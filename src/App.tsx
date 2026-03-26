@@ -11,6 +11,7 @@ import { MainChart } from "./components/MainChart";
 import { AnaerobicThreshold } from "./components/AnaerobicThreshold";
 import { FitnessFreshness } from "./components/FitnessFreshness";
 import { TrainingView } from "./components/TrainingView";
+import { ProfileView } from "./components/ProfileView";
 
 export default function App() {
   const [activeView, setActiveView] = useState("dashboard");
@@ -39,6 +40,8 @@ export default function App() {
         </main>
       ) : activeView === "training" ? (
         <TrainingView />
+      ) : activeView === "profile" ? (
+        <ProfileView />
       ) : (
         <main className="flex-1 flex items-center justify-center text-text-muted">
           <p>This view is not implemented yet.</p>
