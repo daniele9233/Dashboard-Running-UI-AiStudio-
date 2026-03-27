@@ -244,9 +244,11 @@ async def strava_sync():
             summary_polyline = act.get("map", {}).get("summary_polyline", "")
             start_latlng = act.get("start_latlng", [])
 
-            # Fetch detailed activity for splits + full polyline
+            # Fetch detailed activity for splits + full polyline + streams
             splits = []
             full_polyline = ""
+            cadence_per_km = {}  # km_index -> avg cadence
+
             try:
                 detail_resp = await http.get(
                     f"https://www.strava.com/api/v3/activities/{strava_id}",
@@ -255,12 +257,35 @@ async def strava_sync():
                 if detail_resp.status_code == 200:
                     detail = detail_resp.json()
                     full_polyline = detail.get("map", {}).get("polyline", "") or summary_polyline
+
+                    # Fetch cadence stream
+                    try:
+                        streams_resp = await http.get(
+                            f"https://www.strava.com/api/v3/activities/{strava_id}/streams",
+                            headers=headers,
+                            params={"keys": "cadence,distance", "key_type": "stream"},
+                        )
+                        if streams_resp.status_code == 200:
+                            streams = {s["type"]: s["data"] for s in streams_resp.json()}
+                            cadence_data = streams.get("cadence", [])
+                            distance_data = streams.get("distance", [])
+                            if cadence_data and distance_data:
+                                # Group cadence by km
+                                km_cadences: dict = {}
+                                for dist, cad in zip(distance_data, cadence_data):
+                                    km_idx = int(dist / 1000) + 1
+                                    km_cadences.setdefault(km_idx, []).append(cad)
+                                for km_idx, cads in km_cadences.items():
+                                    cadence_per_km[km_idx] = round(sum(cads) / len(cads) * 2)  # *2 for spm
+                    except Exception:
+                        pass
+
                     for i, sp in enumerate(detail.get("splits_metric", []), 1):
                         splits.append({
                             "km": i,
                             "pace": _format_pace(sp.get("average_speed", 0)),
                             "hr": sp.get("average_heartrate"),
-                            "cadence": round(sp.get("average_cadence", 0) * 2) if sp.get("average_cadence") else None,
+                            "cadence": cadence_per_km.get(i) or (round(sp.get("average_cadence", 0) * 2) if sp.get("average_cadence") else None),
                             "distance": sp.get("distance", 0),
                             "elapsed_time": sp.get("elapsed_time", 0),
                             "elevation_difference": sp.get("elevation_difference", 0),
