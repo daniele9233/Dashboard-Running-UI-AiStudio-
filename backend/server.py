@@ -19,7 +19,7 @@ load_dotenv()
 
 # ── ENV ──────────────────────────────────────────────────────────────────────
 MONGO_URL          = os.environ.get("MONGO_URL", "")
-DB_NAME            = os.environ.get("DB_NAME", "QWEN35")
+DB_NAME            = os.environ.get("DB_NAME", "DANIDB")
 STRAVA_CLIENT_ID   = os.environ.get("STRAVA_CLIENT_ID", "")
 STRAVA_CLIENT_SECRET = os.environ.get("STRAVA_CLIENT_SECRET", "")
 FRONTEND_URL       = os.environ.get("FRONTEND_URL", "http://localhost:5173")
