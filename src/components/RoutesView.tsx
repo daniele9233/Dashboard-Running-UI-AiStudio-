@@ -82,6 +82,19 @@ export function RoutesView({ runId }: { runId?: string | null }) {
   const [activeSplit, setActiveSplit] = useState<number | null>(null);
   const [mapMode, setMapMode] = useState<'pace' | 'hr' | 'elevation'>('pace');
   const [drawProgress, setDrawProgress] = useState(0);
+  const [chartMetrics, setChartMetrics] = useState<Set<string>>(new Set(['pace']));
+
+  const toggleChartMetric = (metric: string) => {
+    setChartMetrics(prev => {
+      const next = new Set(prev);
+      if (next.has(metric)) {
+        if (next.size > 1) next.delete(metric); // keep at least one active
+      } else {
+        next.add(metric);
+      }
+      return next;
+    });
+  };
 
   // Fetch real run data
   const { data: run, loading, error } = useApi<Run>(() => getRun(runId ?? ''));
@@ -383,9 +396,9 @@ export function RoutesView({ runId }: { runId?: string | null }) {
                 >
                   <span className="text-[10px] font-black text-gray-500">{String(split.km).padStart(2, '0')}</span>
                   <span className="text-xs font-black italic text-white">{split.pace}</span>
-                  <span className="text-xs font-black italic text-rose-400">{split.hr ?? '—'}</span>
+                  <span className="text-xs font-black italic text-rose-400">{split.hr != null ? Math.round(split.hr) : '—'}</span>
                   <span className="text-xs font-black italic text-amber-400 text-right">
-                    {split.elevation_difference != null ? `${split.elevation_difference > 0 ? '+' : ''}${split.elevation_difference.toFixed(0)}m` : '—'}
+                    {split.elevation_difference != null ? `${split.elevation_difference > 0 ? '+' : ''}${Math.round(split.elevation_difference)}m` : '—'}
                   </span>
                 </button>
               ))}
@@ -445,130 +458,163 @@ export function RoutesView({ runId }: { runId?: string | null }) {
         </div>
       </div>
 
-      {/* OVERLAY: BOTTOM — Multi-metric chart */}
+      {/* OVERLAY: BOTTOM — Multi-metric chart with selectable metrics */}
       {splits.length > 0 && (
-        <div className="absolute bottom-8 left-[380px] right-8 pointer-events-none">
-          <GlassPanel className="pointer-events-auto">
-            <div className="flex items-center justify-between mb-4">
-              <div className="flex items-center gap-6">
-                <div className="flex flex-col">
-                  <span className="text-[9px] font-black text-gray-500 uppercase tracking-widest mb-1">PERFORMANCE CHART</span>
-                  <div className="flex items-center gap-6">
-                    <div className="flex items-center gap-2">
-                      <div className="w-3 h-[2px] bg-emerald-400 rounded-full" />
-                      <span className="text-[8px] font-black text-emerald-400 uppercase tracking-widest">Pace</span>
+        <div className="absolute bottom-6 left-[380px] right-8 pointer-events-none">
+          <div className="bg-[#0A0F1A]/90 backdrop-blur-2xl border border-white/[0.06] rounded-2xl shadow-2xl pointer-events-auto">
+            {/* Chart header */}
+            <div className="px-6 pt-5 pb-3 flex items-center justify-between">
+              {/* Metric selector pills */}
+              <div className="flex items-center gap-2">
+                {([
+                  { key: 'pace', label: 'Pace', color: '#C0FF00', value: run.avg_pace + '/km' },
+                  { key: 'hr', label: 'Heart Rate', color: '#F43F5E', value: run.avg_hr ? `${Math.round(run.avg_hr)} bpm` : '—' },
+                  { key: 'cadence', label: 'Cadence', color: '#8B5CF6', value: run.avg_cadence ? `${Math.round(run.avg_cadence * 2)} spm` : '—' },
+                ] as const).map(({ key, label, color, value }) => (
+                  <button
+                    key={key}
+                    onClick={() => toggleChartMetric(key)}
+                    className={cn(
+                      "flex items-center gap-2.5 px-4 py-2 rounded-xl border transition-all duration-200",
+                      chartMetrics.has(key)
+                        ? "border-white/10 bg-white/[0.06]"
+                        : "border-transparent bg-transparent opacity-40 hover:opacity-70"
+                    )}
+                  >
+                    <div
+                      className={cn("w-2.5 h-2.5 rounded-full transition-all", chartMetrics.has(key) ? "scale-100" : "scale-75")}
+                      style={{ backgroundColor: color, boxShadow: chartMetrics.has(key) ? `0 0 8px ${color}50` : 'none' }}
+                    />
+                    <div className="flex flex-col items-start">
+                      <span className="text-[8px] font-black uppercase tracking-[0.15em] text-gray-500">{label}</span>
+                      <span className="text-xs font-black italic" style={{ color: chartMetrics.has(key) ? color : '#6B7280' }}>{value}</span>
                     </div>
-                    <div className="flex items-center gap-2">
-                      <div className="w-3 h-[2px] bg-rose-500 rounded-full" />
-                      <span className="text-[8px] font-black text-rose-500 uppercase tracking-widest">Heart Rate</span>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <div className="w-3 h-[2px] bg-amber-400 rounded-full" />
-                      <span className="text-[8px] font-black text-amber-400 uppercase tracking-widest">Cadence</span>
-                    </div>
-                  </div>
-                </div>
+                  </button>
+                ))}
               </div>
-              <div className="flex gap-8">
-                <div className="text-right">
-                  <div className="text-[8px] font-black text-gray-500 uppercase tracking-widest mb-1">AVG PACE</div>
-                  <div className="text-lg font-black italic text-emerald-400 tracking-tight">{run.avg_pace}/km</div>
-                </div>
-                <div className="text-right">
-                  <div className="text-[8px] font-black text-gray-500 uppercase tracking-widest mb-1">AVG HR</div>
-                  <div className="text-lg font-black italic text-rose-500 tracking-tight">{run.avg_hr ?? '—'} bpm</div>
-                </div>
-                <div className="text-right">
-                  <div className="text-[8px] font-black text-gray-500 uppercase tracking-widest mb-1">ELEVATION</div>
-                  <div className="text-lg font-black italic text-amber-400 tracking-tight">{run.elevation_gain?.toFixed(0) ?? '—'}m</div>
-                </div>
+
+              {/* Elevation badge */}
+              <div className="flex items-center gap-2 px-3 py-1.5 bg-white/[0.04] rounded-lg">
+                <Mountain className="w-3.5 h-3.5 text-amber-400" />
+                <span className="text-xs font-black italic text-amber-400">{run.elevation_gain?.toFixed(0) ?? '—'}m</span>
               </div>
             </div>
 
-            <div className="h-28 w-full">
+            {/* Chart */}
+            <div className="h-32 px-4 pb-4">
               <ResponsiveContainer width="100%" height="100%">
                 <ComposedChart
                   data={splits.map((s) => ({
-                    km: `${s.km}`,
+                    km: s.km,
                     pace: paceToSeconds(s.pace),
-                    hr: s.hr ?? null,
+                    hr: s.hr != null ? Math.round(s.hr) : null,
                     cadence: s.cadence ?? null,
                   }))}
+                  margin={{ top: 8, right: 12, bottom: 0, left: 12 }}
                 >
                   <defs>
                     <linearGradient id="paceGrad" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor="#10B981" stopOpacity={0.2} />
-                      <stop offset="95%" stopColor="#10B981" stopOpacity={0} />
+                      <stop offset="0%" stopColor="#C0FF00" stopOpacity={0.25} />
+                      <stop offset="100%" stopColor="#C0FF00" stopOpacity={0.02} />
+                    </linearGradient>
+                    <linearGradient id="hrGrad" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor="#F43F5E" stopOpacity={0.15} />
+                      <stop offset="100%" stopColor="#F43F5E" stopOpacity={0.02} />
+                    </linearGradient>
+                    <linearGradient id="cadenceGrad" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor="#8B5CF6" stopOpacity={0.15} />
+                      <stop offset="100%" stopColor="#8B5CF6" stopOpacity={0.02} />
                     </linearGradient>
                   </defs>
-                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
+                  <CartesianGrid
+                    strokeDasharray="none"
+                    stroke="rgba(255,255,255,0.03)"
+                    vertical={false}
+                  />
                   <XAxis
                     dataKey="km"
-                    tick={{ fontSize: 9, fill: '#4B5563', fontWeight: 700 }}
-                    axisLine={{ stroke: 'rgba(255,255,255,0.05)' }}
+                    tick={{ fontSize: 10, fill: '#374151', fontWeight: 800 }}
+                    axisLine={{ stroke: 'rgba(255,255,255,0.06)' }}
                     tickLine={false}
+                    tickFormatter={(v) => `${v}`}
                   />
-                  <YAxis yAxisId="pace" orientation="left" hide domain={['auto', 'auto']} reversed />
-                  <YAxis yAxisId="hr" orientation="right" hide domain={['auto', 'auto']} />
-                  <YAxis yAxisId="cadence" hide domain={['auto', 'auto']} />
+                  <YAxis yAxisId="pace" orientation="left" hide reversed />
+                  <YAxis yAxisId="hr" orientation="right" hide />
+                  <YAxis yAxisId="cadence" hide />
                   <Tooltip
                     contentStyle={{
-                      backgroundColor: 'rgba(15,23,42,0.95)',
-                      border: '1px solid rgba(255,255,255,0.1)',
-                      borderRadius: '12px',
-                      backdropFilter: 'blur(12px)',
-                      padding: '10px 14px',
+                      backgroundColor: 'rgba(10,15,26,0.96)',
+                      border: '1px solid rgba(255,255,255,0.08)',
+                      borderRadius: '14px',
+                      padding: '12px 16px',
+                      boxShadow: '0 20px 40px rgba(0,0,0,0.5)',
                     }}
-                    labelStyle={{ color: '#6B7280', fontSize: 9, fontWeight: 900, textTransform: 'uppercase' as const, letterSpacing: '0.1em' }}
-                    itemStyle={{ fontSize: 11, fontWeight: 900 }}
+                    labelStyle={{ color: '#4B5563', fontSize: 9, fontWeight: 900, textTransform: 'uppercase' as const, letterSpacing: '0.15em', marginBottom: 6 }}
+                    itemStyle={{ fontSize: 12, fontWeight: 900, padding: '2px 0' }}
                     formatter={(value: number, name: string) => {
                       if (name === 'pace') {
                         const m = Math.floor(value / 60);
                         const s = value % 60;
-                        return [`${m}:${String(s).padStart(2, '0')}/km`, 'Pace'];
+                        return [`${m}:${String(Math.round(s)).padStart(2, '0')}/km`, 'Pace'];
                       }
-                      if (name === 'hr') return [`${value} bpm`, 'Heart Rate'];
-                      if (name === 'cadence') return [`${value} spm`, 'Cadence'];
+                      if (name === 'hr') return [`${Math.round(value)} bpm`, 'HR'];
+                      if (name === 'cadence') return [`${Math.round(value)} spm`, 'Cadence'];
                       return [value, name];
                     }}
                     labelFormatter={(label) => `KM ${label}`}
-                    cursor={{ stroke: 'rgba(192,255,0,0.3)', strokeWidth: 1 }}
+                    cursor={{ stroke: 'rgba(192,255,0,0.15)', strokeWidth: 1 }}
                   />
-                  <Area
-                    yAxisId="pace"
-                    type="monotone"
-                    dataKey="pace"
-                    stroke="#10B981"
-                    strokeWidth={2.5}
-                    fill="url(#paceGrad)"
-                    dot={false}
-                    animationDuration={1200}
-                  />
-                  <Line
-                    yAxisId="hr"
-                    type="monotone"
-                    dataKey="hr"
-                    stroke="#F43F5E"
-                    strokeWidth={2}
-                    dot={false}
-                    animationDuration={1400}
-                    connectNulls
-                  />
-                  <Line
-                    yAxisId="cadence"
-                    type="monotone"
-                    dataKey="cadence"
-                    stroke="#F59E0B"
-                    strokeWidth={1.5}
-                    strokeDasharray="4 2"
-                    dot={false}
-                    animationDuration={1600}
-                    connectNulls
-                  />
+
+                  {/* Pace */}
+                  {chartMetrics.has('pace') && (
+                    <Area
+                      yAxisId="pace"
+                      type="monotone"
+                      dataKey="pace"
+                      stroke="#C0FF00"
+                      strokeWidth={2.5}
+                      fill="url(#paceGrad)"
+                      dot={false}
+                      animationDuration={800}
+                      animationEasing="ease-out"
+                    />
+                  )}
+
+                  {/* Heart Rate */}
+                  {chartMetrics.has('hr') && (
+                    <Area
+                      yAxisId="hr"
+                      type="monotone"
+                      dataKey="hr"
+                      stroke="#F43F5E"
+                      strokeWidth={2}
+                      fill="url(#hrGrad)"
+                      dot={false}
+                      animationDuration={1000}
+                      animationEasing="ease-out"
+                      connectNulls
+                    />
+                  )}
+
+                  {/* Cadence */}
+                  {chartMetrics.has('cadence') && (
+                    <Area
+                      yAxisId="cadence"
+                      type="monotone"
+                      dataKey="cadence"
+                      stroke="#8B5CF6"
+                      strokeWidth={2}
+                      fill="url(#cadenceGrad)"
+                      dot={false}
+                      animationDuration={1200}
+                      animationEasing="ease-out"
+                      connectNulls
+                    />
+                  )}
                 </ComposedChart>
               </ResponsiveContainer>
             </div>
-          </GlassPanel>
+          </div>
         </div>
       )}
     </main>
