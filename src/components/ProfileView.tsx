@@ -1,6 +1,7 @@
-import { MapPin, Award, Clock, Activity, Zap, Flame, Calendar, ChevronRight, Edit3, Share2 } from "lucide-react";
+import { useState } from "react";
+import { MapPin, Award, Clock, Activity, Zap, Flame, Calendar, ChevronRight, Edit3, Share2, RefreshCw, Link2 } from "lucide-react";
 import { useApi } from "../hooks/useApi";
-import { getProfile } from "../api";
+import { getProfile, getStravaAuthUrl, syncStrava } from "../api";
 import type { Profile } from "../types/api";
 
 function buildPRs(pbs: Profile['pbs']) {
@@ -64,12 +65,36 @@ const getHeatmapColor = (intensity: number) => {
 
 export function ProfileView() {
   const { data: profile, loading } = useApi<Profile>(getProfile);
+  const [syncing, setSyncing] = useState(false);
+  const [syncResult, setSyncResult] = useState<string | null>(null);
 
   const PRs = profile ? buildPRs(profile.pbs) : [];
   const displayName = profile?.name ?? '—';
   const totalKm = profile?.total_km ?? 0;
   const raceGoal = profile?.race_goal ?? '—';
   const level = profile?.level ?? '—';
+
+  const handleStravaConnect = async () => {
+    try {
+      const data = await getStravaAuthUrl();
+      window.location.href = data.url;
+    } catch (err) {
+      console.error("Failed to get Strava auth URL:", err);
+    }
+  };
+
+  const handleStravaSync = async () => {
+    setSyncing(true);
+    setSyncResult(null);
+    try {
+      const res = await syncStrava() as { synced?: number };
+      setSyncResult(`${res.synced ?? 0} corse sincronizzate!`);
+    } catch (err) {
+      setSyncResult("Errore nella sincronizzazione. Connetti prima Strava.");
+    } finally {
+      setSyncing(false);
+    }
+  };
 
   return (
     <div className="flex-1 overflow-y-auto bg-[#121212] text-white pb-12">
@@ -225,7 +250,41 @@ export function ProfileView() {
 
         {/* Right Column (PRs & Achievements) */}
         <div className="space-y-8">
-          
+
+          {/* Strava Integration */}
+          <div className="bg-[#181818] border border-[#2A2A2A] rounded-2xl p-6">
+            <div className="flex items-center gap-3 mb-5">
+              <div className="w-10 h-10 rounded-xl bg-[#FC4C02]/20 flex items-center justify-center">
+                <svg viewBox="0 0 24 24" className="w-5 h-5 text-[#FC4C02]" fill="currentColor">
+                  <path d="M15.387 17.944l-2.089-4.116h-3.065L15.387 24l5.15-10.172h-3.066m-7.008-5.599l2.836 5.598h4.172L10.463 0l-7 13.828h4.169" />
+                </svg>
+              </div>
+              <h2 className="text-lg font-bold text-white">Strava</h2>
+            </div>
+            <div className="space-y-3">
+              <button
+                onClick={handleStravaConnect}
+                className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-[#FC4C02] hover:bg-[#E34402] rounded-xl text-sm font-bold text-white transition-colors"
+              >
+                <Link2 className="w-4 h-4" />
+                Connetti Strava
+              </button>
+              <button
+                onClick={handleStravaSync}
+                disabled={syncing}
+                className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-[#1E1E1E] hover:bg-[#2A2A2A] border border-[#2A2A2A] rounded-xl text-sm font-bold text-gray-300 transition-colors disabled:opacity-50"
+              >
+                <RefreshCw className={`w-4 h-4 ${syncing ? 'animate-spin' : ''}`} />
+                {syncing ? 'Sincronizzazione...' : 'Sincronizza Corse'}
+              </button>
+              {syncResult && (
+                <p className={`text-xs font-medium text-center ${syncResult.includes('Errore') ? 'text-rose-400' : 'text-emerald-400'}`}>
+                  {syncResult}
+                </p>
+              )}
+            </div>
+          </div>
+
           {/* Personal Records */}
           <div className="bg-[#181818] border border-[#2A2A2A] rounded-2xl p-6">
             <h2 className="text-lg font-bold text-white mb-6">Personal Records</h2>
