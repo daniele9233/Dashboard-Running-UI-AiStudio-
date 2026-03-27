@@ -195,90 +195,105 @@ def _format_pace(speed_ms: float) -> str:
 
 @app.post("/api/strava/sync")
 async def strava_sync():
-    """Fetch recent activities from Strava and upsert into DB."""
+    """Fetch ALL activities from Strava (paginated) and upsert into DB."""
     tokens = await db.strava_tokens.find_one(sort=[("_id", -1)])
     if not tokens:
         return JSONResponse({"error": "not_connected"}, status_code=400)
 
     tokens = await _refresh_token_if_needed(tokens)
-
-    async with httpx.AsyncClient() as http:
-        resp = await http.get(
-            "https://www.strava.com/api/v3/athlete/activities",
-            headers={"Authorization": f"Bearer {tokens['access_token']}"},
-            params={"per_page": 100},
-        )
-
-    if resp.status_code != 200:
-        return JSONResponse({"error": "fetch_failed", "detail": resp.text}, status_code=400)
-
-    activities = resp.json()
+    headers = {"Authorization": f"Bearer {tokens['access_token']}"}
     synced = 0
 
-    for act in activities:
-        if act.get("type") != "Run":
-            continue
-
-        strava_id = act["id"]
-        distance_km = round(act.get("distance", 0) / 1000, 2)
-        duration_min = round(act.get("moving_time", 0) / 60, 2)
-        avg_speed = act.get("average_speed", 0)
-        avg_pace = _format_pace(avg_speed)
-        avg_hr = act.get("average_heartrate")
-        max_hr = act.get("max_heartrate")
-        date_str = act.get("start_date_local", "")[:10]
-
-        # Fetch detailed activity for splits
-        splits = []
-        try:
-            detail_resp = await http.get(
-                f"https://www.strava.com/api/v3/activities/{strava_id}",
-                headers={"Authorization": f"Bearer {tokens['access_token']}"},
+    async with httpx.AsyncClient(timeout=30.0) as http:
+        # 1) Paginate through ALL activities
+        all_activities = []
+        page = 1
+        while True:
+            resp = await http.get(
+                "https://www.strava.com/api/v3/athlete/activities",
+                headers=headers,
+                params={"per_page": 200, "page": page},
             )
-        except Exception:
-            detail_resp = None
-
-        if detail_resp and detail_resp.status_code == 200:
-            detail = detail_resp.json()
-            for i, sp in enumerate(detail.get("splits_metric", []), 1):
-                splits.append({
-                    "km": i,
-                    "pace": _format_pace(sp.get("average_speed", 0)),
-                    "hr": sp.get("average_heartrate"),
-                    "distance": sp.get("distance", 0),
-                    "elapsed_time": sp.get("elapsed_time", 0),
-                    "elevation_difference": sp.get("elevation_difference", 0),
-                })
+            if resp.status_code != 200:
+                break
+            batch = resp.json()
+            if not batch:
+                break
+            all_activities.extend(batch)
+            page += 1
 
         # Get profile for HR % calculation
         profile = await db.profile.find_one()
         max_hr_profile = profile.get("max_hr", 200) if profile else 200
 
-        run_doc = {
-            "strava_id": strava_id,
-            "date": date_str,
-            "distance_km": distance_km,
-            "duration_minutes": duration_min,
-            "avg_pace": avg_pace,
-            "avg_hr": round(avg_hr) if avg_hr else None,
-            "max_hr": round(max_hr) if max_hr else None,
-            "avg_hr_pct": round((avg_hr / max_hr_profile) * 100) if avg_hr else None,
-            "max_hr_pct": round((max_hr / max_hr_profile) * 100) if max_hr else None,
-            "run_type": _classify_run({"distance_km": distance_km, "avg_pace": avg_pace}),
-            "notes": f"Importata da Strava: {act.get('name', '')}",
-            "location": act.get("location_city") or act.get("timezone", "").split("/")[-1],
-            "avg_cadence": act.get("average_cadence"),
-            "elevation_gain": round(act.get("total_elevation_gain", 0), 1),
-            "splits": splits,
-            "plan_feedback": None,
-        }
+        # 2) Process each run
+        for act in all_activities:
+            if act.get("type") != "Run":
+                continue
 
-        await db.runs.update_one(
-            {"strava_id": strava_id},
-            {"$set": run_doc},
-            upsert=True,
-        )
-        synced += 1
+            strava_id = act["id"]
+            distance_km = round(act.get("distance", 0) / 1000, 2)
+            duration_min = round(act.get("moving_time", 0) / 60, 2)
+            avg_speed = act.get("average_speed", 0)
+            avg_pace = _format_pace(avg_speed)
+            avg_hr = act.get("average_heartrate")
+            max_hr = act.get("max_heartrate")
+            date_str = act.get("start_date_local", "")[:10]
+
+            # Get summary polyline from the activity list data
+            summary_polyline = act.get("map", {}).get("summary_polyline", "")
+            start_latlng = act.get("start_latlng", [])
+
+            # Fetch detailed activity for splits + full polyline
+            splits = []
+            full_polyline = ""
+            try:
+                detail_resp = await http.get(
+                    f"https://www.strava.com/api/v3/activities/{strava_id}",
+                    headers=headers,
+                )
+                if detail_resp.status_code == 200:
+                    detail = detail_resp.json()
+                    full_polyline = detail.get("map", {}).get("polyline", "") or summary_polyline
+                    for i, sp in enumerate(detail.get("splits_metric", []), 1):
+                        splits.append({
+                            "km": i,
+                            "pace": _format_pace(sp.get("average_speed", 0)),
+                            "hr": sp.get("average_heartrate"),
+                            "distance": sp.get("distance", 0),
+                            "elapsed_time": sp.get("elapsed_time", 0),
+                            "elevation_difference": sp.get("elevation_difference", 0),
+                        })
+            except Exception:
+                full_polyline = summary_polyline
+
+            run_doc = {
+                "strava_id": strava_id,
+                "date": date_str,
+                "distance_km": distance_km,
+                "duration_minutes": duration_min,
+                "avg_pace": avg_pace,
+                "avg_hr": round(avg_hr) if avg_hr else None,
+                "max_hr": round(max_hr) if max_hr else None,
+                "avg_hr_pct": round((avg_hr / max_hr_profile) * 100) if avg_hr else None,
+                "max_hr_pct": round((max_hr / max_hr_profile) * 100) if max_hr else None,
+                "run_type": _classify_run({"distance_km": distance_km, "avg_pace": avg_pace}),
+                "notes": f"Importata da Strava: {act.get('name', '')}",
+                "location": act.get("location_city") or act.get("timezone", "").split("/")[-1],
+                "avg_cadence": act.get("average_cadence"),
+                "elevation_gain": round(act.get("total_elevation_gain", 0), 1),
+                "splits": splits,
+                "polyline": full_polyline or summary_polyline,
+                "start_latlng": start_latlng,
+                "plan_feedback": None,
+            }
+
+            await db.runs.update_one(
+                {"strava_id": strava_id},
+                {"$set": run_doc},
+                upsert=True,
+            )
+            synced += 1
 
     return {"ok": True, "synced": synced}
 

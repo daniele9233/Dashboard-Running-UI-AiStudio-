@@ -62,6 +62,8 @@ export interface Run {
   avg_cadence: number | null;
   elevation_gain: number;
   splits: Split[];
+  polyline: string | null;
+  start_latlng: [number, number] | null;
   plan_feedback: PlanFeedback | null;
 }
 
