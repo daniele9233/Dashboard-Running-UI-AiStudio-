@@ -32,6 +32,7 @@ export interface Split {
   km: number;
   pace: string;
   hr: number | null;
+  cadence: number | null;
   distance: number;
   elapsed_time: number;
   elevation_difference: number;

@@ -8,7 +8,7 @@ import {
 } from 'lucide-react';
 import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip,
-  ResponsiveContainer, ReferenceLine
+  ResponsiveContainer, ReferenceLine, ComposedChart, Line
 } from 'recharts';
 import { motion, AnimatePresence } from 'motion/react';
 import { cn } from '../lib/utils';
@@ -216,7 +216,7 @@ export function RoutesView({ runId }: { runId?: string | null }) {
             zoom: 14,
             pitch: 45,
           }}
-          mapStyle="https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json"
+          mapStyle="https://tiles.openfreemap.org/styles/dark"
           style={{ width: '100%', height: '100%' }}
         >
           {/* Route segments */}
@@ -445,64 +445,127 @@ export function RoutesView({ runId }: { runId?: string | null }) {
         </div>
       </div>
 
-      {/* OVERLAY: BOTTOM — Elevation from splits */}
+      {/* OVERLAY: BOTTOM — Multi-metric chart */}
       {splits.length > 0 && (
         <div className="absolute bottom-8 left-[380px] right-8 pointer-events-none">
           <GlassPanel className="pointer-events-auto">
             <div className="flex items-center justify-between mb-4">
               <div className="flex items-center gap-6">
                 <div className="flex flex-col">
-                  <span className="text-[9px] font-black text-gray-500 uppercase tracking-widest mb-1">ELEVATION PROFILE</span>
-                  <div className="flex items-baseline gap-2">
-                    <span className="text-xl font-black italic text-white tracking-tighter">{run.elevation_gain?.toFixed(0) ?? '—'}m</span>
-                    <span className="text-[9px] font-black text-gray-600 uppercase tracking-widest">TOTAL GAIN</span>
+                  <span className="text-[9px] font-black text-gray-500 uppercase tracking-widest mb-1">PERFORMANCE CHART</span>
+                  <div className="flex items-center gap-6">
+                    <div className="flex items-center gap-2">
+                      <div className="w-3 h-[2px] bg-emerald-400 rounded-full" />
+                      <span className="text-[8px] font-black text-emerald-400 uppercase tracking-widest">Pace</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <div className="w-3 h-[2px] bg-rose-500 rounded-full" />
+                      <span className="text-[8px] font-black text-rose-500 uppercase tracking-widest">Heart Rate</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <div className="w-3 h-[2px] bg-amber-400 rounded-full" />
+                      <span className="text-[8px] font-black text-amber-400 uppercase tracking-widest">Cadence</span>
+                    </div>
                   </div>
                 </div>
               </div>
-              <div className="flex gap-10">
+              <div className="flex gap-8">
                 <div className="text-right">
                   <div className="text-[8px] font-black text-gray-500 uppercase tracking-widest mb-1">AVG PACE</div>
-                  <div className="text-xl font-black italic text-emerald-400 tracking-tight">{run.avg_pace}/km</div>
+                  <div className="text-lg font-black italic text-emerald-400 tracking-tight">{run.avg_pace}/km</div>
                 </div>
                 <div className="text-right">
                   <div className="text-[8px] font-black text-gray-500 uppercase tracking-widest mb-1">AVG HR</div>
-                  <div className="text-xl font-black italic text-rose-500 tracking-tight">{run.avg_hr ?? '—'} bpm</div>
+                  <div className="text-lg font-black italic text-rose-500 tracking-tight">{run.avg_hr ?? '—'} bpm</div>
                 </div>
                 <div className="text-right">
-                  <div className="text-[8px] font-black text-gray-500 uppercase tracking-widest mb-1">DISTANCE</div>
-                  <div className="text-xl font-black italic text-white tracking-tight">{run.distance_km?.toFixed(2)} km</div>
+                  <div className="text-[8px] font-black text-gray-500 uppercase tracking-widest mb-1">ELEVATION</div>
+                  <div className="text-lg font-black italic text-amber-400 tracking-tight">{run.elevation_gain?.toFixed(0) ?? '—'}m</div>
                 </div>
               </div>
             </div>
 
-            <div className="h-20 w-full">
+            <div className="h-28 w-full">
               <ResponsiveContainer width="100%" height="100%">
-                <AreaChart
+                <ComposedChart
                   data={splits.map((s) => ({
-                    km: s.km,
-                    elevation: s.elevation_difference ?? 0,
+                    km: `${s.km}`,
                     pace: paceToSeconds(s.pace),
+                    hr: s.hr ?? null,
+                    cadence: s.cadence ?? null,
                   }))}
                 >
                   <defs>
-                    <linearGradient id="colorElev" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor="#C0FF00" stopOpacity={0.3} />
-                      <stop offset="95%" stopColor="#C0FF00" stopOpacity={0} />
+                    <linearGradient id="paceGrad" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor="#10B981" stopOpacity={0.2} />
+                      <stop offset="95%" stopColor="#10B981" stopOpacity={0} />
                     </linearGradient>
                   </defs>
-                  <XAxis dataKey="km" hide />
-                  <YAxis hide />
-                  <Tooltip content={() => null} cursor={{ stroke: '#C0FF00', strokeWidth: 1 }} />
-                  <Area
-                    type="monotone"
-                    dataKey="elevation"
-                    stroke="#C0FF00"
-                    strokeWidth={2}
-                    fillOpacity={1}
-                    fill="url(#colorElev)"
-                    animationDuration={1000}
+                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
+                  <XAxis
+                    dataKey="km"
+                    tick={{ fontSize: 9, fill: '#4B5563', fontWeight: 700 }}
+                    axisLine={{ stroke: 'rgba(255,255,255,0.05)' }}
+                    tickLine={false}
                   />
-                </AreaChart>
+                  <YAxis yAxisId="pace" orientation="left" hide domain={['auto', 'auto']} reversed />
+                  <YAxis yAxisId="hr" orientation="right" hide domain={['auto', 'auto']} />
+                  <YAxis yAxisId="cadence" hide domain={['auto', 'auto']} />
+                  <Tooltip
+                    contentStyle={{
+                      backgroundColor: 'rgba(15,23,42,0.95)',
+                      border: '1px solid rgba(255,255,255,0.1)',
+                      borderRadius: '12px',
+                      backdropFilter: 'blur(12px)',
+                      padding: '10px 14px',
+                    }}
+                    labelStyle={{ color: '#6B7280', fontSize: 9, fontWeight: 900, textTransform: 'uppercase' as const, letterSpacing: '0.1em' }}
+                    itemStyle={{ fontSize: 11, fontWeight: 900 }}
+                    formatter={(value: number, name: string) => {
+                      if (name === 'pace') {
+                        const m = Math.floor(value / 60);
+                        const s = value % 60;
+                        return [`${m}:${String(s).padStart(2, '0')}/km`, 'Pace'];
+                      }
+                      if (name === 'hr') return [`${value} bpm`, 'Heart Rate'];
+                      if (name === 'cadence') return [`${value} spm`, 'Cadence'];
+                      return [value, name];
+                    }}
+                    labelFormatter={(label) => `KM ${label}`}
+                    cursor={{ stroke: 'rgba(192,255,0,0.3)', strokeWidth: 1 }}
+                  />
+                  <Area
+                    yAxisId="pace"
+                    type="monotone"
+                    dataKey="pace"
+                    stroke="#10B981"
+                    strokeWidth={2.5}
+                    fill="url(#paceGrad)"
+                    dot={false}
+                    animationDuration={1200}
+                  />
+                  <Line
+                    yAxisId="hr"
+                    type="monotone"
+                    dataKey="hr"
+                    stroke="#F43F5E"
+                    strokeWidth={2}
+                    dot={false}
+                    animationDuration={1400}
+                    connectNulls
+                  />
+                  <Line
+                    yAxisId="cadence"
+                    type="monotone"
+                    dataKey="cadence"
+                    stroke="#F59E0B"
+                    strokeWidth={1.5}
+                    strokeDasharray="4 2"
+                    dot={false}
+                    animationDuration={1600}
+                    connectNulls
+                  />
+                </ComposedChart>
               </ResponsiveContainer>
             </div>
           </GlassPanel>

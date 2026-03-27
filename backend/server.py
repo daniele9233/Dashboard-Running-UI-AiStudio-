@@ -260,6 +260,7 @@ async def strava_sync():
                             "km": i,
                             "pace": _format_pace(sp.get("average_speed", 0)),
                             "hr": sp.get("average_heartrate"),
+                            "cadence": round(sp.get("average_cadence", 0) * 2) if sp.get("average_cadence") else None,
                             "distance": sp.get("distance", 0),
                             "elapsed_time": sp.get("elapsed_time", 0),
                             "elevation_difference": sp.get("elevation_difference", 0),
