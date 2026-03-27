@@ -1,11 +1,19 @@
 import { MapPin, Award, Clock, Activity, Zap, Flame, Calendar, ChevronRight, Edit3, Share2 } from "lucide-react";
+import { useApi } from "../hooks/useApi";
+import { getProfile } from "../api";
+import type { Profile } from "../types/api";
 
-const PRs = [
-  { distance: "5K", time: "18:45", pace: "3:45/km", date: "Oct 12, 2025" },
-  { distance: "10K", time: "39:20", pace: "3:56/km", date: "Nov 05, 2025" },
-  { distance: "Half Marathon", time: "1:25:10", pace: "4:02/km", date: "Feb 28, 2026" },
-  { distance: "Marathon", time: "2:58:40", pace: "4:14/km", date: "Apr 15, 2025" },
-];
+function buildPRs(pbs: Profile['pbs']) {
+  const labelMap: Record<string, string> = {
+    '5km': '5K', '10km': '10K', '21.1km': 'Mezza Maratona', '42.2km': 'Maratona',
+  };
+  return Object.entries(pbs).map(([key, pb]) => ({
+    distance: labelMap[key] ?? key,
+    time: pb.time,
+    pace: `${pb.pace}/km`,
+    date: pb.date,
+  }));
+}
 
 const shoes = [
   { name: "Nike Vaporfly 3", brand: "Nike", mileage: 120, max: 400, color: "bg-[#F43F5E]" },
@@ -20,7 +28,12 @@ const achievements = [
   { title: "Speed Demon", icon: Activity, color: "text-purple-400", bg: "bg-purple-400/10" },
 ];
 
-// Generate dummy data for the activity heatmap (GitHub style)
+// Deterministic pseudo-random based on seed (no Math.random())
+const seededRng = (seed: number) => {
+  const x = Math.sin(seed) * 10000;
+  return x - Math.floor(x);
+};
+
 const generateHeatmap = () => {
   const weeks = 24;
   const days = 7;
@@ -28,8 +41,8 @@ const generateHeatmap = () => {
   for (let i = 0; i < days; i++) {
     const row = [];
     for (let j = 0; j < weeks; j++) {
-      // Random intensity 0-4
-      const intensity = Math.random() > 0.3 ? Math.floor(Math.random() * 4) + 1 : 0;
+      const seed = i * 100 + j;
+      const intensity = seededRng(seed) > 0.3 ? Math.floor(seededRng(seed + 50) * 4) + 1 : 0;
       row.push(intensity);
     }
     grid.push(row);
@@ -50,6 +63,14 @@ const getHeatmapColor = (intensity: number) => {
 };
 
 export function ProfileView() {
+  const { data: profile, loading } = useApi<Profile>(getProfile);
+
+  const PRs = profile ? buildPRs(profile.pbs) : [];
+  const displayName = profile?.name ?? '—';
+  const totalKm = profile?.total_km ?? 0;
+  const raceGoal = profile?.race_goal ?? '—';
+  const level = profile?.level ?? '—';
+
   return (
     <div className="flex-1 overflow-y-auto bg-[#121212] text-white pb-12">
       {/* Hero Section */}
@@ -81,10 +102,12 @@ export function ProfileView() {
             </div>
             
             <div className="mb-2">
-              <h1 className="text-4xl font-bold text-white mb-1 tracking-tight">Andrew Smith</h1>
+              <h1 className="text-4xl font-bold text-white mb-1 tracking-tight">
+                {loading ? <span className="animate-pulse bg-white/10 rounded w-40 h-9 inline-block" /> : displayName}
+              </h1>
               <div className="flex items-center gap-4 text-gray-400 font-medium">
-                <span className="flex items-center gap-1"><MapPin className="w-4 h-4" /> Milan, Italy</span>
-                <span className="flex items-center gap-1"><Calendar className="w-4 h-4" /> Joined 2023</span>
+                <span className="flex items-center gap-1"><Activity className="w-4 h-4" /> {raceGoal}</span>
+                <span className="flex items-center gap-1"><Calendar className="w-4 h-4" /> {level}</span>
               </div>
             </div>
           </div>
@@ -109,10 +132,10 @@ export function ProfileView() {
           {/* Quick Stats */}
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             {[
-              { label: "Yearly Distance", value: "2,450", unit: "km", icon: Activity, color: "text-[#3B82F6]" },
-              { label: "Avg Pace", value: "4:45", unit: "/km", icon: Clock, color: "text-[#10B981]" },
-              { label: "Total Time", value: "184", unit: "hrs", icon: Zap, color: "text-[#EAB308]" },
-              { label: "Races", value: "12", unit: "done", icon: Award, color: "text-[#F43F5E]" },
+              { label: "Km Totali", value: totalKm > 0 ? totalKm.toFixed(0) : '—', unit: "km", icon: Activity, color: "text-[#3B82F6]" },
+              { label: "Obiettivo", value: raceGoal, unit: "", icon: Clock, color: "text-[#10B981]" },
+              { label: "Livello", value: level, unit: "", icon: Zap, color: "text-[#EAB308]" },
+              { label: "PB Registrati", value: String(PRs.length), unit: "distanze", icon: Award, color: "text-[#F43F5E]" },
             ].map((stat, i) => (
               <div key={i} className="bg-[#181818] border border-[#2A2A2A] rounded-2xl p-5 hover:border-[#3A3A3A] transition-colors">
                 <div className="flex items-center justify-between mb-4">

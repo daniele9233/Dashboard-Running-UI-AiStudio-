@@ -59,7 +59,7 @@ export function TopStats() {
         </div>
         <div className="flex justify-between mt-2 text-[10px] text-text-muted">
           {distanceData.map((d) => (
-            <span key={d.name}>{d.value}%</span>
+            <span key={d.name}>{d.name}</span>
           ))}
         </div>
       </div>

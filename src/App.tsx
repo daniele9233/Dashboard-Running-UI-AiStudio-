@@ -3,41 +3,72 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState } from "react";
+import { useEffect } from "react";
+import { Routes, Route, useNavigate, useLocation } from "react-router-dom";
 import { Sidebar } from "./components/Sidebar";
-import { TopStats } from "./components/TopStats";
-import { RecentActivities } from "./components/RecentActivities";
-import { MainChart } from "./components/MainChart";
-import { AnaerobicThreshold } from "./components/AnaerobicThreshold";
-import { FitnessFreshness } from "./components/FitnessFreshness";
+import { DashboardView } from "./components/DashboardView";
 import { TrainingView } from "./components/TrainingView";
 import { ProfileView } from "./components/ProfileView";
 import { StatisticsView } from "./components/statistics/StatisticsView";
 import { RoutesView } from "./components/RoutesView";
 import { ActivitiesView } from "./components/ActivitiesView";
-import { Search, Bell, Settings, User } from "lucide-react";
+import { Search, Bell, Settings } from "lucide-react";
+import { useParams } from "react-router-dom";
+import { exchangeStravaCode, syncStrava } from "./api";
+
+// Wrapper per passare runId da URL params a RoutesView
+function RoutesViewWrapper() {
+  const { runId } = useParams<{ runId: string }>();
+  return <RoutesView runId={runId ?? null} />;
+}
+
+// View placeholder per sezioni non ancora implementate
+function ComingSoonView({ label }: { label: string }) {
+  return (
+    <main className="flex-1 flex items-center justify-center text-gray-500">
+      <p className="text-sm font-black uppercase tracking-widest">{label} — Coming Soon</p>
+    </main>
+  );
+}
+
+const NAV_ITEMS = [
+  { path: "/",            label: "DASHBOARD"  },
+  { path: "/training",    label: "TRAINING"   },
+  { path: "/activities",  label: "ACTIVITIES" },
+  { path: "/statistics",  label: "STATISTICS" },
+  { path: "/profile",     label: "PROFILE"    },
+];
 
 export default function App() {
-  const [activeView, setActiveView] = useState("dashboard");
-  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
+  const navigate = useNavigate();
+  const location = useLocation();
 
-  const handleSelectRun = (runId: string) => {
-    setSelectedRunId(runId);
-    setActiveView("routes");
+  // Handle Strava OAuth callback: exchange code and sync
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const stravaCode = params.get("strava_code");
+    if (stravaCode) {
+      // Remove the query param from the URL
+      window.history.replaceState({}, "", window.location.pathname);
+      exchangeStravaCode(stravaCode)
+        .then(() => syncStrava())
+        .then(() => navigate("/activities"))
+        .catch((err) => console.error("Strava sync failed:", err));
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Deriva la view attiva dal primo segmento del path
+  const activeSegment = location.pathname.split("/")[1] || "dashboard";
+
+  const isNavActive = (path: string) => {
+    const segment = path === "/" ? "dashboard" : path.slice(1);
+    return activeSegment === segment;
   };
-
-  const navItems = [
-    { id: "dashboard", label: "DASHBOARD" },
-    { id: "training", label: "TRAINING" },
-    { id: "recovery", label: "RECOVERY" },
-    { id: "biometrics", label: "BIOMETRICS" },
-    { id: "insights", label: "INSIGHTS" },
-  ];
 
   return (
     <div className="w-full h-screen bg-[#050505] flex overflow-hidden text-white font-sans">
-      <Sidebar activeView={activeView} onViewChange={setActiveView} />
-      
+      <Sidebar activeView={activeSegment} onViewChange={(id) => navigate(id === "dashboard" ? "/" : `/${id}`)} />
+
       <div className="flex-1 flex flex-col min-w-0">
         {/* Top Navigation Bar */}
         <header className="h-16 border-b border-white/5 flex items-center justify-between px-8 bg-[#0A0A0A] z-40">
@@ -46,12 +77,12 @@ export default function App() {
               <span className="text-xl font-black italic tracking-tighter text-[#C0FF00]">METIC LAB</span>
             </div>
             <nav className="flex items-center gap-8">
-              {navItems.map((item) => (
+              {NAV_ITEMS.map((item) => (
                 <button
-                  key={item.id}
-                  onClick={() => setActiveView(item.id)}
+                  key={item.path}
+                  onClick={() => navigate(item.path)}
                   className={`text-[10px] font-black tracking-[0.2em] transition-colors ${
-                    activeView === item.id ? "text-[#C0FF00]" : "text-gray-500 hover:text-white"
+                    isNavActive(item.path) ? "text-[#C0FF00]" : "text-gray-500 hover:text-white"
                   }`}
                 >
                   {item.label}
@@ -63,9 +94,9 @@ export default function App() {
           <div className="flex items-center gap-6">
             <div className="relative group">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500 group-focus-within:text-[#C0FF00] transition-colors" />
-              <input 
-                type="text" 
-                placeholder="Analyze specific route..." 
+              <input
+                type="text"
+                placeholder="Analyze specific route..."
                 className="bg-white/5 border border-white/10 rounded-xl pl-10 pr-4 py-2 text-xs font-medium focus:outline-none focus:border-[#C0FF00]/50 w-64 transition-all"
               />
             </div>
@@ -84,46 +115,22 @@ export default function App() {
           </div>
         </header>
 
-        {/* View Content */}
+        {/* Route Content */}
         <div className="flex-1 flex flex-col overflow-hidden relative">
-          {activeView === "dashboard" ? (
-            <main className="flex-1 flex flex-col p-8 overflow-y-auto custom-scrollbar">
-              <TopStats />
-              <div className="grid grid-cols-[350px_1fr] gap-6 mb-6">
-                <div className="flex flex-col gap-6 h-[674px]">
-                  <div className="flex-1 min-h-0">
-                    <RecentActivities />
-                  </div>
-                  <div className="h-[200px]">
-                    <AnaerobicThreshold />
-                  </div>
-                </div>
-                <div className="h-[674px]">
-                  <MainChart />
-                </div>
-              </div>
-              <FitnessFreshness />
-            </main>
-          ) : activeView === "activities" ? (
-            <ActivitiesView onSelectRun={handleSelectRun} />
-          ) : activeView === "training" ? (
-            <TrainingView />
-          ) : activeView === "profile" ? (
-            <ProfileView />
-          ) : activeView === "routes" ? (
-            <RoutesView runId={selectedRunId} />
-          ) : activeView === "statistiche" ? (
-            <StatisticsView />
-          ) : (
-            <main className="flex-1 flex items-center justify-center text-gray-500">
-              <p className="text-sm font-black uppercase tracking-widest">This view is not implemented yet.</p>
-            </main>
-          )}
+          <Routes>
+            <Route path="/"                 element={<DashboardView />} />
+            <Route path="/activities"       element={<ActivitiesView onSelectRun={(id) => navigate(`/activities/${id}`)} />} />
+            <Route path="/activities/:runId" element={<RoutesViewWrapper />} />
+            <Route path="/training"         element={<TrainingView />} />
+            <Route path="/statistics"       element={<StatisticsView />} />
+            <Route path="/profile"          element={<ProfileView />} />
+            <Route path="/recovery"         element={<ComingSoonView label="Recovery" />} />
+            <Route path="/biometrics"       element={<ComingSoonView label="Biometrics" />} />
+            <Route path="/insights"         element={<ComingSoonView label="Insights" />} />
+            <Route path="*"                 element={<ComingSoonView label="Page not found" />} />
+          </Routes>
         </div>
       </div>
     </div>
   );
 }
-
-
-
