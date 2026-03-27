@@ -1,15 +1,12 @@
 import {
-  Activity,
-  Calendar,
-  Map,
-  MessageSquare,
-  Bell,
-  Settings,
+  LayoutGrid,
+  Gauge,
+  BarChart3,
+  Box,
+  Zap,
+  HelpCircle,
   LogOut,
-  User,
-  Footprints,
-  BarChart2,
-  LayoutDashboard
+  Zap as Bolt
 } from "lucide-react";
 import { cn } from "../lib/utils";
 
@@ -19,84 +16,56 @@ interface SidebarProps {
 }
 
 export function Sidebar({ activeView, onViewChange }: SidebarProps) {
-  const generalLinks = [
-    { id: "dashboard", name: "Dashboard", icon: LayoutDashboard },
-    { id: "activities", name: "Activities", icon: Activity },
-    { id: "training", name: "Training", icon: Calendar },
-    { id: "routes", name: "Routes", icon: Map },
-    { id: "statistiche", name: "Statistiche", icon: BarChart2 },
-  ];
-
-  const personalLinks = [
-    { id: "profile", name: "Profile", icon: User },
-    { id: "messages", name: "Messages", icon: MessageSquare },
-    { id: "notifications", name: "Notifications", icon: Bell },
-    { id: "settings", name: "Settings", icon: Settings },
+  const menuItems = [
+    { id: "dashboard", icon: LayoutGrid, label: "Dashboard" },
+    { id: "activities", icon: Gauge, label: "Activities" },
+    { id: "statistiche", icon: BarChart3, label: "Statistics" },
+    { id: "training", icon: Box, label: "Training" },
+    { id: "insights", icon: Zap, label: "Insights" },
   ];
 
   return (
-    <aside className="w-64 bg-bg-app border-r border-[#1E293B] flex flex-col h-full py-6 px-4">
-      <div className="flex items-center gap-3 px-2 mb-10">
-        <div className="w-6 h-6 bg-text-primary rounded-sm flex items-center justify-center">
-          <Footprints className="w-4 h-4 text-bg-app" />
-        </div>
-        <span className="font-bold text-lg tracking-wider">RUNMATE</span>
-      </div>
-
-      <div className="flex-1 overflow-y-auto">
-        <div className="mb-8">
-          <h3 className="text-xs font-semibold text-text-muted mb-3 px-2 tracking-wider">GENERAL</h3>
-          <ul className="space-y-1">
-            {generalLinks.map((link) => (
-              <li key={link.id}>
-                <button
-                  onClick={() => onViewChange(link.id)}
-                  className={cn(
-                    "w-full flex items-center gap-3 px-2 py-2 rounded-md transition-colors text-sm text-left",
-                    activeView === link.id
-                      ? "bg-bg-hover text-accent border-l-2 border-accent"
-                      : "text-text-secondary hover:text-text-primary hover:bg-bg-hover/50 border-l-2 border-transparent"
-                  )}
-                >
-                  <link.icon className="w-4 h-4" />
-                  {link.name}
-                </button>
-              </li>
-            ))}
-          </ul>
-        </div>
-
-        <div>
-          <h3 className="text-xs font-semibold text-text-muted mb-3 px-2 tracking-wider">PERSONAL</h3>
-          <ul className="space-y-1">
-            {personalLinks.map((link) => (
-              <li key={link.id}>
-                <button
-                  onClick={() => onViewChange(link.id)}
-                  className={cn(
-                    "w-full flex items-center gap-3 px-2 py-2 rounded-md transition-colors text-sm text-left",
-                    activeView === link.id
-                      ? "bg-bg-hover text-accent border-l-2 border-accent"
-                      : "text-text-secondary hover:text-text-primary hover:bg-bg-hover/50 border-l-2 border-transparent"
-                  )}
-                >
-                  <link.icon className="w-4 h-4" />
-                  {link.name}
-                </button>
-              </li>
-            ))}
-          </ul>
+    <aside className="w-[72px] bg-[#0A0A0A] border-r border-white/5 flex flex-col items-center py-6 h-full z-50">
+      {/* Logo Icon */}
+      <div className="mb-10">
+        <div className="w-10 h-10 bg-[#C0FF00] rounded-lg flex items-center justify-center shadow-[0_0_20px_rgba(192,255,0,0.3)]">
+          <Bolt className="w-6 h-6 text-black fill-current" />
         </div>
       </div>
 
-      <div className="mt-auto pt-6">
-        <div className="bg-[#151E1C] rounded-lg p-4 mb-4 border border-[#1E293B]/50">
-          <h4 className="text-xs text-text-muted mb-1">MONTHLY DISTANCE</h4>
-          <div className="text-xl font-bold text-text-primary">142.5 km</div>
-        </div>
-        <button className="flex items-center gap-3 px-2 py-2 text-sm text-text-secondary hover:text-text-primary transition-colors w-full">
-          <LogOut className="w-4 h-4" />
-          Log out
+      {/* Main Menu */}
+      <nav className="flex-1 flex flex-col gap-6">
+        {menuItems.map((item) => (
+          <button
+            key={item.id}
+            onClick={() => onViewChange(item.id)}
+            className={cn(
+              "w-12 h-12 rounded-xl flex items-center justify-center transition-all duration-300 group relative",
+              activeView === item.id
+                ? "bg-[#C0FF00]/10 text-[#C0FF00]"
+                : "text-gray-500 hover:text-white hover:bg-white/5"
+            )}
+          >
+            <item.icon className={cn(
+              "w-5 h-5 transition-transform duration-300",
+              activeView === item.id ? "scale-110" : "group-hover:scale-110"
+            )} />
+            
+            {/* Tooltip or Indicator */}
+            {activeView === item.id && (
+              <div className="absolute left-0 w-1 h-6 bg-[#C0FF00] rounded-r-full" />
+            )}
+          </button>
+        ))}
+      </nav>
+
+      {/* Bottom Menu */}
+      <div className="mt-auto flex flex-col gap-6">
+        <button className="w-12 h-12 rounded-xl flex items-center justify-center text-gray-500 hover:text-white hover:bg-white/5 transition-all">
+          <HelpCircle className="w-5 h-5" />
+        </button>
+        <button className="w-12 h-12 rounded-xl flex items-center justify-center text-gray-500 hover:text-rose-500 hover:bg-rose-500/5 transition-all">
+          <LogOut className="w-5 h-5" />
         </button>
       </div>
     </aside>
