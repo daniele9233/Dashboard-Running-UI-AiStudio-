@@ -152,6 +152,7 @@ async def strava_exchange_code(request: Request):
     if not existing:
         profile_patch.update({
             "age": 0, "weight_kg": 0, "height_cm": 0, "max_hr": 190,
+            "sex": "", "profile_pic": athlete.get("profile", ""),
             "started_running": "", "total_km": 0, "race_goal": "",
             "race_date": "", "target_pace": None, "target_time": "",
             "level": "", "max_weekly_km": None, "injury": None,
@@ -1019,7 +1020,6 @@ async def get_best_efforts():
     # Target distances: (label, meters, min_run_km, splits_km or None)
     targets = [
         ("400m",            400,   0.3, None),
-        ("800m",            800,   0.7, None),
         ("1 km",           1000,   0.9,  1),
         ("4 km",           4000,   3.5,  4),
         ("5 km",           5000,   4.5,  5),
@@ -1028,6 +1028,8 @@ async def get_best_efforts():
         ("Mezza Maratona",21097,  20.0, 21),
         ("Maratona",      42195,  40.0, 42),
     ]
+
+    MIN_PACE_S = 150  # 2:30/km — anything faster is GPS glitch
 
     bests: dict = {t[0]: None for t in targets}
 
@@ -1063,6 +1065,10 @@ async def get_best_efforts():
                 if actual_s > 0:
                     pace_s = actual_s / km
                     effort = {"time_s": actual_s, "pace_s": pace_s}
+
+            # Discard GPS glitch results (faster than 2:30/km is not human)
+            if effort and effort["pace_s"] < MIN_PACE_S:
+                effort = None
 
             if effort and (bests[label] is None or effort["pace_s"] < bests[label]["pace_s"]):
                 bests[label] = {

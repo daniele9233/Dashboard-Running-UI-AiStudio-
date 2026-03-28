@@ -13,6 +13,9 @@ export interface Profile {
   weight_kg: number;
   height_cm: number;
   max_hr: number;
+  sex: string;
+  profile_pic: string;
+  strava_profile_pic: string;
   started_running: string;
   total_km: number;
   race_goal: string;
