@@ -40,6 +40,7 @@ export const toggleSessionComplete = (weekId: string, sessionIndex: number, comp
 
 // ─── FITNESS & FRESHNESS ─────────────────────────────────────────────────────
 export const getFitnessFreshness = () => api.get<FitnessFreshnessResponse>('/api/fitness-freshness');
+export const recalculateFitnessFreshness = () => api.post('/api/fitness-freshness/recalculate');
 
 // ─── ANALYTICS ───────────────────────────────────────────────────────────────
 export const getAnalytics = () => api.get<AnalyticsResponse>('/api/analytics');

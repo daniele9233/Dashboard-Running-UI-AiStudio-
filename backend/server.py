@@ -198,6 +198,80 @@ async def _refresh_token_if_needed(tokens: dict) -> dict:
     return tokens
 
 
+async def _compute_fitness_freshness(athlete_id: str, max_hr_profile: int = 190, resting_hr: int = 50):
+    """Calcola CTL/ATL/TSB da tutte le corse usando TRIMP metodo Lucia (2003).
+
+    trimp = duration_min × hr_reserve × (0.64 × e^(1.92 × hr_reserve))
+    CTL = EMA 42 giorni, ATL = EMA 7 giorni, TSB = CTL − ATL
+    """
+    from datetime import date, timedelta
+
+    q = {"athlete_id": athlete_id} if athlete_id else {}
+    runs = await db.runs.find(q, {"date": 1, "duration_minutes": 1, "avg_hr": 1}).sort("date", 1).to_list(None)
+    if not runs:
+        return
+
+    # ── TRIMP giornaliero ──────────────────────────────────────────────────────
+    daily_trimp: dict[str, float] = {}
+    safe_max = max_hr_profile if max_hr_profile > resting_hr else 190
+    safe_rest = resting_hr if resting_hr > 0 else 50
+
+    for run in runs:
+        date_str = str(run.get("date", ""))[:10]
+        if not date_str:
+            continue
+        duration_min = float(run.get("duration_minutes") or 0)
+        avg_hr = run.get("avg_hr")
+
+        if avg_hr and avg_hr > 0:
+            hr_res = (avg_hr - safe_rest) / (safe_max - safe_rest)
+            hr_res = max(0.0, min(1.0, hr_res))
+        else:
+            hr_res = 0.55  # fallback senza HR
+
+        trimp = duration_min * hr_res * (0.64 * math.exp(1.92 * hr_res))
+        daily_trimp[date_str] = daily_trimp.get(date_str, 0.0) + trimp
+
+    if not daily_trimp:
+        return
+
+    # ── EMA giornaliera: CTL (42gg) / ATL (7gg) ───────────────────────────────
+    ALPHA_CTL = 2.0 / (42 + 1)
+    ALPHA_ATL = 2.0 / (7 + 1)
+
+    first_date = date.fromisoformat(min(daily_trimp.keys()))
+    today = date.today()
+
+    ctl = 0.0
+    atl = 0.0
+    docs = []
+    current = first_date
+
+    while current <= today:
+        ds = current.isoformat()
+        trimp_today = daily_trimp.get(ds, 0.0)
+        ctl = ctl + ALPHA_CTL * (trimp_today - ctl)
+        atl = atl + ALPHA_ATL * (trimp_today - atl)
+        tsb = ctl - atl
+
+        # Salva: giorni con corse + snapshot settimanali (ogni lunedì)
+        if trimp_today > 0 or current.weekday() == 0:
+            docs.append({
+                "athlete_id": athlete_id,
+                "date": ds,
+                "trimp": round(trimp_today, 2),
+                "ctl": round(ctl, 2),
+                "atl": round(atl, 2),
+                "tsb": round(tsb, 2),
+            })
+        current += timedelta(days=1)
+
+    # ── Scrivi in MongoDB (sostituisci tutto) ──────────────────────────────────
+    await db.fitness_freshness.delete_many(q)
+    if docs:
+        await db.fitness_freshness.insert_many(docs)
+
+
 def _classify_run(run_data: dict) -> str:
     """Simple run-type classifier based on pace and duration."""
     distance = run_data.get("distance_km", 0)
@@ -395,6 +469,13 @@ async def strava_sync():
         total = round(agg[0]["total"], 1) if agg else 0
         await db.profile.update_one({"athlete_id": athlete_id}, {"$set": {"total_km": total}})
 
+    # ── Ricalcola CTL/ATL/TSB dopo ogni sync ──────────────────────────────────
+    if athlete_id:
+        profile_doc = await db.profile.find_one({"athlete_id": athlete_id})
+        max_hr_p = int(profile_doc.get("max_hr", 190)) if profile_doc else 190
+        resting_hr_p = int(profile_doc.get("resting_hr", 50)) if profile_doc else 50
+        await _compute_fitness_freshness(athlete_id, max_hr_p, resting_hr_p)
+
     return {"ok": True, "synced": synced}
 
 
@@ -586,21 +667,57 @@ async def toggle_session_complete(request: Request):
 
 @app.get("/api/fitness-freshness")
 async def get_fitness_freshness():
-    cursor = db.fitness_freshness.find().sort("date", 1)
-    docs = await cursor.to_list(length=365)
+    from datetime import date, timedelta
+    athlete_id = await _get_athlete_id()
+    q = {"athlete_id": athlete_id} if athlete_id else {}
+    cursor = db.fitness_freshness.find(q).sort("date", 1)
+    docs = await cursor.to_list(length=1000)
 
     current = None
     if docs:
         latest = docs[-1]
-        tsb = latest.get("tsb", 0)
+        ctl = round(latest.get("ctl", 0), 1)
+        atl = round(latest.get("atl", 0), 1)
+        tsb = round(latest.get("tsb", 0), 1)
+
+        # Trend CTL vs 7 giorni fa
+        target_date = (date.today() - timedelta(days=7)).isoformat()
+        ctl_7d = ctl
+        for doc in reversed(docs):
+            if doc.get("date", "") <= target_date:
+                ctl_7d = doc.get("ctl", ctl)
+                break
+        ctl_trend = round(ctl - ctl_7d, 1)
+
+        if tsb > 10:
+            form_status, form_color = "Fresco", "green"
+        elif tsb > 0:
+            form_status, form_color = "Neutro", "yellow"
+        elif tsb > -10:
+            form_status, form_color = "Affaticato", "orange"
+        else:
+            form_status, form_color = "Sovrallenamento", "red"
+
         current = {
-            "ctl": latest.get("ctl", 0),
-            "atl": latest.get("atl", 0),
-            "tsb": tsb,
-            "status": "Fresh" if tsb > 5 else "Tired" if tsb < -10 else "Neutral",
+            "ctl": ctl, "atl": atl, "tsb": tsb,
+            "ctl_trend": ctl_trend,
+            "form_status": form_status,
+            "form_color": form_color,
         }
 
     return {"fitness_freshness": oids(docs), "current": current or {}}
+
+
+@app.post("/api/fitness-freshness/recalculate")
+async def recalculate_fitness_freshness():
+    """Ricalcola CTL/ATL/TSB da zero per l'atleta corrente."""
+    athlete_id = await _get_athlete_id()
+    q = {"athlete_id": athlete_id} if athlete_id else {}
+    profile_doc = await db.profile.find_one(q)
+    max_hr_p = int(profile_doc.get("max_hr", 190)) if profile_doc else 190
+    resting_hr_p = int(profile_doc.get("resting_hr", 50)) if profile_doc else 50
+    await _compute_fitness_freshness(athlete_id, max_hr_p, resting_hr_p)
+    return {"ok": True}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

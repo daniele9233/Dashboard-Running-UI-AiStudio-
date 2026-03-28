@@ -128,6 +128,17 @@ export interface FitnessFreshnessResponse {
 
 // ─── DASHBOARD ───────────────────────────────────────────────────────────────
 
+export interface CurrentFF {
+  ctl: number;
+  atl: number;
+  tsb: number;
+  ctl_trend?: number;
+  form_status?: string;
+  form_color?: string;
+  /** legacy */
+  status?: string;
+}
+
 export interface DashboardResponse {
   profile: Profile;
   next_session: Session | null;
@@ -137,12 +148,7 @@ export interface DashboardResponse {
     pct: number;
   } | null;
   fitness_freshness: FitnessFreshnessPoint[];
-  current_ff: {
-    ctl: number;
-    atl: number;
-    tsb: number;
-    status: string;
-  } | null;
+  current_ff: CurrentFF | null;
   last_run: Run | null;
   recovery_score: number | null;
 }
