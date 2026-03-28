@@ -190,6 +190,30 @@ export interface SupercompensationResponse {
   projection: unknown[];
 }
 
+// ─── BEST EFFORTS ────────────────────────────────────────────────────────────
+
+export interface BestEffort {
+  distance: string;
+  time: string;
+  pace: string;
+  date: string;
+}
+
+export interface BestEffortsResponse {
+  efforts: BestEffort[];
+}
+
+// ─── HEATMAP ─────────────────────────────────────────────────────────────────
+
+export interface HeatmapPoint {
+  date: string;
+  km: number;
+}
+
+export interface HeatmapResponse {
+  heatmap: HeatmapPoint[];
+}
+
 // ─── ANALYTICS ───────────────────────────────────────────────────────────────
 
 export interface AnalyticsResponse {

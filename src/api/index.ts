@@ -10,6 +10,8 @@ import type {
   InjuryRiskResponse,
   SupercompensationResponse,
   AnalyticsResponse,
+  BestEffortsResponse,
+  HeatmapResponse,
 } from '../types/api';
 
 // ─── PROFILE ────────────────────────────────────────────────────────────────
@@ -79,10 +81,10 @@ export const getWeeklyReport = () => api.get<unknown>('/api/weekly-report');
 export const getWeeklyHistory = () => api.get<unknown>('/api/weekly-history');
 
 // ─── BEST EFFORTS ────────────────────────────────────────────────────────────
-export const getBestEfforts = () => api.get<unknown>('/api/best-efforts');
+export const getBestEfforts = () => api.get<BestEffortsResponse>('/api/best-efforts');
 
 // ─── HEATMAP ─────────────────────────────────────────────────────────────────
-export const getHeatmap = () => api.get<unknown>('/api/heatmap');
+export const getHeatmap = () => api.get<HeatmapResponse>('/api/heatmap');
 
 // ─── AI ──────────────────────────────────────────────────────────────────────
 export const analyzeRun = (runId: string) =>
