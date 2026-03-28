@@ -4,8 +4,8 @@ import { MainChart } from "./MainChart";
 import { AnaerobicThreshold } from "./AnaerobicThreshold";
 import { FitnessFreshness } from "./FitnessFreshness";
 import { useApi } from "../hooks/useApi";
-import { getDashboard } from "../api";
-import type { DashboardResponse } from "../types/api";
+import { getDashboard, getRuns } from "../api";
+import type { DashboardResponse, RunsResponse } from "../types/api";
 
 function daysUntil(dateStr: string): number {
   const target = new Date(dateStr);
@@ -22,7 +22,7 @@ function DashboardHeader({ data }: { data: DashboardResponse }) {
     <div className="flex items-center justify-between mb-6 px-1">
       <div>
         <h2 className="text-2xl font-black italic tracking-tight text-white uppercase">
-          Ciao, {profile.name || 'Runner'} 👋
+          Ciao, {profile.name || "Runner"} 👋
         </h2>
         <p className="text-sm text-gray-500 font-medium mt-1">
           {profile.race_goal} — {profile.race_date}
@@ -34,7 +34,9 @@ function DashboardHeader({ data }: { data: DashboardResponse }) {
 
       {week_progress && (
         <div className="bg-white/5 border border-white/10 rounded-xl px-5 py-3 text-right">
-          <div className="text-[10px] text-gray-500 uppercase tracking-widest font-bold mb-1">Settimana</div>
+          <div className="text-[10px] text-gray-500 uppercase tracking-widest font-bold mb-1">
+            Settimana
+          </div>
           <div className="text-lg font-black text-white">
             {week_progress.done_km.toFixed(1)}
             <span className="text-gray-500 text-sm font-medium"> / {week_progress.target_km} km</span>
@@ -50,7 +52,9 @@ function DashboardHeader({ data }: { data: DashboardResponse }) {
 
       {next_session && (
         <div className="bg-white/5 border border-white/10 rounded-xl px-5 py-3">
-          <div className="text-[10px] text-gray-500 uppercase tracking-widest font-bold mb-1">Prossimo allenamento</div>
+          <div className="text-[10px] text-gray-500 uppercase tracking-widest font-bold mb-1">
+            Prossimo allenamento
+          </div>
           <div className="text-sm font-black text-white">{next_session.title}</div>
           <div className="text-xs text-gray-400 mt-0.5">
             {next_session.target_distance_km > 0 && `${next_session.target_distance_km} km`}
@@ -63,37 +67,66 @@ function DashboardHeader({ data }: { data: DashboardResponse }) {
 }
 
 export function DashboardView() {
-  const { data, loading, error } = useApi<DashboardResponse>(getDashboard);
+  const { data: dashData, loading: dashLoading, error: dashError } =
+    useApi<DashboardResponse>(getDashboard);
+  const { data: runsData, loading: runsLoading } =
+    useApi<RunsResponse>(getRuns);
+
+  const runs = runsData?.runs ?? [];
+
+  // Calcola il CTL del penultimo punto per il delta
+  const ffHistory = dashData?.fitness_freshness ?? [];
+  const prevCtl = ffHistory.length >= 2
+    ? ffHistory[ffHistory.length - 2].ctl
+    : null;
 
   return (
     <main className="flex-1 flex flex-col p-8 overflow-y-auto custom-scrollbar">
-      {/* Header dinamico con dati reali */}
-      {loading && (
+      {/* ── Header ── */}
+      {dashLoading && (
         <div className="mb-6 h-16 bg-white/5 rounded-xl animate-pulse" />
       )}
-      {error && (
+      {dashError && (
         <div className="mb-6 text-xs text-rose-400 bg-rose-500/10 border border-rose-500/20 rounded-xl px-4 py-3">
-          Errore connessione backend: {error}
+          Errore connessione backend: {dashError}
         </div>
       )}
-      {data && <DashboardHeader data={data} />}
+      {dashData && <DashboardHeader data={dashData} />}
 
-      {/* Componenti esistenti (design invariato) */}
-      <TopStats />
+      {/* ── Skeleton TopStats mentre carica ── */}
+      {runsLoading && runs.length === 0 && (
+        <div className="grid grid-cols-3 gap-4 mb-6">
+          {[1, 2, 3].map((i) => (
+            <div key={i} className="bg-white/5 rounded-xl h-48 animate-pulse" />
+          ))}
+        </div>
+      )}
+
+      {/* ── Componenti con dati reali ── */}
+      <TopStats runs={runs} />
+
       <div className="grid grid-cols-[350px_1fr] gap-6 mb-6">
         <div className="flex flex-col gap-6 h-[674px]">
           <div className="flex-1 min-h-0">
-            <RecentActivities />
+            <RecentActivities runs={runs} />
           </div>
           <div className="h-[200px]">
-            <AnaerobicThreshold />
+            <AnaerobicThreshold
+              runs={runs}
+              maxHr={dashData?.profile?.max_hr ?? 180}
+            />
           </div>
         </div>
         <div className="h-[674px]">
-          <MainChart />
+          <MainChart runs={runs} />
         </div>
       </div>
-      <FitnessFreshness />
+
+      <FitnessFreshness
+        fitnessFreshness={ffHistory}
+        currentFf={dashData?.current_ff ?? null}
+        prevCtl={prevCtl}
+      />
     </main>
   );
 }

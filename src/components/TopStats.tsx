@@ -1,149 +1,346 @@
+import { useMemo } from "react";
 import { BarChart, Bar, AreaChart, Area, ResponsiveContainer, YAxis, Cell } from "recharts";
-import { ChevronDown } from "lucide-react";
+import type { Run } from "../types/api";
 
-const distanceData = [
-  { name: "Mon", value: 35, color: "#8B5CF6" },
-  { name: "Tue", value: 12, color: "#3B82F6" },
-  { name: "Wed", value: 20, color: "#14B8A6" },
-  { name: "Thu", value: 9, color: "#F59E0B" },
-  { name: "Fri", value: 24, color: "#F43F5E" },
-];
+interface TopStatsProps {
+  runs: Run[];
+}
 
-const paceData = [
-  { name: "Jan", value: 5.5 },
-  { name: "Feb", value: 5.2 },
-  { name: "Mar", value: 5.0 },
-  { name: "Apr", value: 5.8 },
-  { name: "May", value: 5.4 },
-  { name: "Jun", value: 5.1 },
-  { name: "Jul", value: 4.9 },
-];
+// ─── Utilities ──────────────────────────────────────────────────────────────
 
-const elevationData = [
-  { name: "Jan", value: 1200 },
-  { name: "Feb", value: 1400 },
-  { name: "Mar", value: 1100 },
-  { name: "Apr", value: 1800 },
-  { name: "May", value: 1600 },
-  { name: "Jun", value: 2200 },
-  { name: "Jul", value: 2500 },
-];
+function parsePaceToSecs(pace: string): number {
+  if (!pace) return 0;
+  const parts = pace.split(":");
+  if (parts.length !== 2) return 0;
+  const m = parseInt(parts[0]);
+  const s = parseInt(parts[1]);
+  if (isNaN(m) || isNaN(s)) return 0;
+  return m * 60 + s;
+}
 
-export function TopStats() {
+function secsToPaceStr(secs: number): string {
+  if (secs <= 0) return "--";
+  const m = Math.floor(secs / 60);
+  const s = Math.round(secs % 60);
+  return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
+function getWeekStart(date: Date): Date {
+  const d = new Date(date);
+  const day = d.getDay();
+  const diff = day === 0 ? -6 : 1 - day;
+  d.setDate(d.getDate() + diff);
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+
+const DAY_NAMES = ["Lun", "Mar", "Mer", "Gio", "Ven", "Sab", "Dom"];
+const DAY_COLORS = ["#8B5CF6", "#3B82F6", "#14B8A6", "#F59E0B", "#F43F5E", "#10B981", "#EC4899"];
+
+// ─── Component ──────────────────────────────────────────────────────────────
+
+export function TopStats({ runs }: TopStatsProps) {
+  // ── Total Distance (questa settimana) ──────────────────────────────────────
+  const { weekDayData, thisWeekKm, weekPct } = useMemo(() => {
+    const weekStart = getWeekStart(new Date());
+    const lastWeekStart = new Date(weekStart);
+    lastWeekStart.setDate(weekStart.getDate() - 7);
+
+    const dayData = DAY_NAMES.map((name, i) => {
+      const dayDate = new Date(weekStart);
+      dayDate.setDate(weekStart.getDate() + i);
+      const dayStr = dayDate.toISOString().slice(0, 10);
+      const km = runs
+        .filter((r) => r.date?.slice(0, 10) === dayStr)
+        .reduce((sum, r) => sum + (r.distance_km || 0), 0);
+      return { name, value: parseFloat(km.toFixed(1)), color: DAY_COLORS[i] };
+    });
+
+    const thisKm = parseFloat(dayData.reduce((s, d) => s + d.value, 0).toFixed(1));
+
+    const lastKm = runs
+      .filter((r) => {
+        const d = r.date?.slice(0, 10);
+        if (!d) return false;
+        const rd = new Date(d);
+        return rd >= lastWeekStart && rd < weekStart;
+      })
+      .reduce((sum, r) => sum + (r.distance_km || 0), 0);
+
+    const pct = lastKm > 0 ? Math.round(((thisKm - lastKm) / lastKm) * 100) : null;
+
+    return { weekDayData: dayData, thisWeekKm: thisKm, weekPct: pct };
+  }, [runs]);
+
+  // ── Avg Pace (andamento mensile) ──────────────────────────────────────────
+  const { paceMonthData, currentPace, pacePct, paceMin, paceMax } = useMemo(() => {
+    const now = new Date();
+    const monthData: { name: string; value: number }[] = [];
+    let currSecs = 0;
+    let prevSecs = 0;
+
+    for (let i = 6; i >= 0; i--) {
+      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      const monthRuns = runs.filter((r) => {
+        const rd = new Date(r.date);
+        return (
+          rd.getFullYear() === d.getFullYear() &&
+          rd.getMonth() === d.getMonth() &&
+          r.avg_pace &&
+          parsePaceToSecs(r.avg_pace) > 100
+        );
+      });
+      const avgSecs =
+        monthRuns.length > 0
+          ? monthRuns.reduce((sum, r) => sum + parsePaceToSecs(r.avg_pace), 0) / monthRuns.length
+          : 0;
+      const decimalMins = avgSecs > 0 ? parseFloat((avgSecs / 60).toFixed(3)) : 0;
+      monthData.push({
+        name: d.toLocaleString("en", { month: "short" }).toUpperCase(),
+        value: decimalMins,
+      });
+      if (i === 0) currSecs = avgSecs;
+      if (i === 1) prevSecs = avgSecs;
+    }
+
+    const pct =
+      prevSecs > 0 && currSecs > 0
+        ? Math.round(((currSecs - prevSecs) / prevSecs) * 100)
+        : null;
+
+    const values = monthData.map((m) => m.value).filter((v) => v > 0);
+    const minV = values.length > 0 ? Math.min(...values) - 0.3 : 4;
+    const maxV = values.length > 0 ? Math.max(...values) + 0.3 : 7;
+
+    return {
+      paceMonthData: monthData,
+      currentPace: secsToPaceStr(currSecs),
+      pacePct: pct,
+      paceMin: minV,
+      paceMax: maxV,
+    };
+  }, [runs]);
+
+  const paceYAxisLabels = useMemo(() => [
+    secsToPaceStr(paceMax * 60),
+    secsToPaceStr(((paceMin + paceMax) / 2) * 60),
+    secsToPaceStr(paceMin * 60),
+  ], [paceMin, paceMax]);
+
+  // ── Elevation Gain (quest'anno) ───────────────────────────────────────────
+  const { elevMonthData, thisYearElev, elevPct, elevMax } = useMemo(() => {
+    const now = new Date();
+    const thisYear = now.getFullYear();
+    const lastYear = thisYear - 1;
+
+    const monthData: { name: string; value: number }[] = [];
+    for (let i = 6; i >= 0; i--) {
+      const d = new Date(thisYear, now.getMonth() - i, 1);
+      const elev = runs
+        .filter((r) => {
+          const rd = new Date(r.date);
+          return rd.getFullYear() === d.getFullYear() && rd.getMonth() === d.getMonth();
+        })
+        .reduce((sum, r) => sum + (r.elevation_gain || 0), 0);
+      monthData.push({
+        name: d.toLocaleString("en", { month: "short" }).toUpperCase(),
+        value: Math.round(elev),
+      });
+    }
+
+    const thisTotal = runs
+      .filter((r) => new Date(r.date).getFullYear() === thisYear)
+      .reduce((sum, r) => sum + (r.elevation_gain || 0), 0);
+    const lastTotal = runs
+      .filter((r) => new Date(r.date).getFullYear() === lastYear)
+      .reduce((sum, r) => sum + (r.elevation_gain || 0), 0);
+
+    const pct = lastTotal > 0 ? Math.round(((thisTotal - lastTotal) / lastTotal) * 100) : null;
+    const maxV = Math.max(...monthData.map((m) => m.value), 200);
+
+    return { elevMonthData: monthData, thisYearElev: Math.round(thisTotal), elevPct: pct, elevMax: maxV };
+  }, [runs]);
+
+  // ─── Render ───────────────────────────────────────────────────────────────
   return (
     <div className="grid grid-cols-3 gap-4 mb-6">
-      {/* Total Distance Card */}
+      {/* ── Total Distance ── */}
       <div className="bg-bg-card border border-[#1E293B] rounded-xl p-5 flex flex-col justify-between">
         <div className="flex justify-between items-start mb-4">
           <div>
             <h3 className="text-xs text-text-muted font-semibold tracking-wider mb-1 uppercase">Total Distance</h3>
             <div className="flex items-baseline gap-2">
-              <span className="text-2xl font-bold text-text-primary">42.8 km</span>
-              <span className="text-xs text-[#F43F5E] bg-[#F43F5E]/10 px-1.5 py-0.5 rounded">-12%</span>
+              <span className="text-2xl font-bold text-text-primary">
+                {thisWeekKm > 0 ? `${thisWeekKm} km` : "0 km"}
+              </span>
+              {weekPct !== null && (
+                <span
+                  className={`text-xs px-1.5 py-0.5 rounded ${
+                    weekPct >= 0
+                      ? "text-[#14B8A6] bg-[#14B8A6]/10"
+                      : "text-[#F43F5E] bg-[#F43F5E]/10"
+                  }`}
+                >
+                  {weekPct >= 0 ? "+" : ""}
+                  {weekPct}%
+                </span>
+              )}
             </div>
           </div>
-          <button className="text-xs text-text-secondary flex items-center gap-1 hover:text-text-primary">
-            THIS WEEK <ChevronDown className="w-3 h-3" />
-          </button>
+          <span className="text-xs text-text-secondary">QUESTA SETT.</span>
         </div>
+
         <div className="h-24 w-full mt-auto">
-          <ResponsiveContainer width="100%" height="100%">
-            <BarChart data={distanceData} margin={{ top: 0, right: 0, left: 0, bottom: 0 }}>
-              <Bar dataKey="value" radius={[2, 2, 0, 0]}>
-                {distanceData.map((entry, index) => (
-                  <Cell key={`cell-${index}`} fill={entry.color} />
+          {weekDayData.some((d) => d.value > 0) ? (
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={weekDayData} margin={{ top: 0, right: 0, left: 0, bottom: 0 }}>
+                <Bar dataKey="value" radius={[2, 2, 0, 0]}>
+                  {weekDayData.map((entry, index) => (
+                    <Cell key={index} fill={entry.color} opacity={entry.value > 0 ? 1 : 0.12} />
+                  ))}
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          ) : (
+            <div className="h-full flex items-end pb-2">
+              <div className="w-full grid grid-cols-7 gap-1">
+                {DAY_NAMES.map((_, i) => (
+                  <div key={i} className="h-3 rounded-sm" style={{ backgroundColor: DAY_COLORS[i], opacity: 0.12 }} />
                 ))}
-              </Bar>
-            </BarChart>
-          </ResponsiveContainer>
+              </div>
+            </div>
+          )}
         </div>
         <div className="flex justify-between mt-2 text-[10px] text-text-muted">
-          {distanceData.map((d) => (
-            <span key={d.name}>{d.name}</span>
+          {DAY_NAMES.map((d) => (
+            <span key={d}>{d}</span>
           ))}
         </div>
       </div>
 
-      {/* Avg Pace Card */}
+      {/* ── Avg Pace ── */}
       <div className="bg-bg-card border border-[#1E293B] rounded-xl p-5 flex flex-col justify-between">
         <div className="flex justify-between items-start mb-4">
           <div>
             <h3 className="text-xs text-text-muted font-semibold tracking-wider mb-1 uppercase">Avg Pace</h3>
             <div className="flex items-baseline gap-2">
-              <span className="text-2xl font-bold text-text-primary">5:12 /km</span>
-              <span className="text-xs text-[#14B8A6] bg-[#14B8A6]/10 px-1.5 py-0.5 rounded">-2%</span>
+              <span className="text-2xl font-bold text-text-primary">
+                {currentPace !== "--" ? `${currentPace} /km` : "--"}
+              </span>
+              {pacePct !== null && (
+                <span
+                  className={`text-xs px-1.5 py-0.5 rounded ${
+                    pacePct <= 0
+                      ? "text-[#14B8A6] bg-[#14B8A6]/10"
+                      : "text-[#F43F5E] bg-[#F43F5E]/10"
+                  }`}
+                >
+                  {pacePct >= 0 ? "+" : ""}
+                  {pacePct}%
+                </span>
+              )}
             </div>
           </div>
-          <button className="text-xs text-text-secondary flex items-center gap-1 hover:text-text-primary">
-            THIS YEAR <ChevronDown className="w-3 h-3" />
-          </button>
+          <span className="text-xs text-text-secondary">QUEST'ANNO</span>
         </div>
+
         <div className="h-24 w-full mt-auto relative">
           <div className="absolute left-0 top-0 h-full flex flex-col justify-between text-[10px] text-text-muted pb-6">
-            <span>6:00</span>
-            <span>5:00</span>
-            <span>4:00</span>
+            {paceYAxisLabels.map((l, i) => (
+              <span key={i}>{l}</span>
+            ))}
           </div>
           <div className="ml-8 h-full">
             <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={paceData} margin={{ top: 5, right: 0, left: 0, bottom: 0 }}>
+              <AreaChart
+                data={paceMonthData.filter((d) => d.value > 0)}
+                margin={{ top: 5, right: 0, left: 0, bottom: 0 }}
+              >
                 <defs>
                   <linearGradient id="colorPace" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#F43F5E" stopOpacity={0.3}/>
-                    <stop offset="95%" stopColor="#F43F5E" stopOpacity={0}/>
+                    <stop offset="5%" stopColor="#F43F5E" stopOpacity={0.3} />
+                    <stop offset="95%" stopColor="#F43F5E" stopOpacity={0} />
                   </linearGradient>
                 </defs>
-                <YAxis domain={[4.0, 6.0]} hide />
-                <Area type="monotone" dataKey="value" stroke="#F43F5E" strokeWidth={2} fillOpacity={1} fill="url(#colorPace)" isAnimationActive={false} />
+                <YAxis domain={[paceMin, paceMax]} hide />
+                <Area
+                  type="monotone"
+                  dataKey="value"
+                  stroke="#F43F5E"
+                  strokeWidth={2}
+                  fillOpacity={1}
+                  fill="url(#colorPace)"
+                  isAnimationActive={false}
+                />
               </AreaChart>
             </ResponsiveContainer>
           </div>
         </div>
         <div className="flex justify-between ml-8 mt-2 text-[10px] text-text-muted">
-          {paceData.map((d) => (
-            <span key={d.name}>{d.name.toUpperCase()}</span>
+          {paceMonthData.map((d) => (
+            <span key={d.name}>{d.name}</span>
           ))}
         </div>
       </div>
 
-      {/* Elevation Gain Card */}
+      {/* ── Elevation Gain ── */}
       <div className="bg-bg-card border border-[#1E293B] rounded-xl p-5 flex flex-col justify-between">
         <div className="flex justify-between items-start mb-4">
           <div>
             <h3 className="text-xs text-text-muted font-semibold tracking-wider mb-1 uppercase">Elevation Gain</h3>
             <div className="flex items-baseline gap-2">
-              <span className="text-2xl font-bold text-text-primary">1,215 m</span>
-              <span className="text-xs text-[#14B8A6] bg-[#14B8A6]/10 px-1.5 py-0.5 rounded">+4%</span>
+              <span className="text-2xl font-bold text-text-primary">
+                {thisYearElev > 0 ? `${thisYearElev.toLocaleString("it")} m` : "0 m"}
+              </span>
+              {elevPct !== null && (
+                <span
+                  className={`text-xs px-1.5 py-0.5 rounded ${
+                    elevPct >= 0
+                      ? "text-[#14B8A6] bg-[#14B8A6]/10"
+                      : "text-[#F43F5E] bg-[#F43F5E]/10"
+                  }`}
+                >
+                  {elevPct >= 0 ? "+" : ""}
+                  {elevPct}%
+                </span>
+              )}
             </div>
           </div>
-          <button className="text-xs text-text-secondary flex items-center gap-1 hover:text-text-primary">
-            THIS YEAR <ChevronDown className="w-3 h-3" />
-          </button>
+          <span className="text-xs text-text-secondary">QUEST'ANNO</span>
         </div>
+
         <div className="h-24 w-full mt-auto relative">
           <div className="absolute left-0 top-0 h-full flex flex-col justify-between text-[10px] text-text-muted pb-6">
-            <span>2.8K</span>
-            <span>1.4K</span>
+            <span>{elevMax >= 1000 ? `${(elevMax / 1000).toFixed(1)}K` : elevMax}</span>
+            <span>{elevMax >= 1000 ? `${(elevMax / 2000).toFixed(1)}K` : Math.round(elevMax / 2)}</span>
             <span>0</span>
           </div>
           <div className="ml-8 h-full">
             <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={elevationData} margin={{ top: 5, right: 0, left: 0, bottom: 0 }}>
+              <AreaChart data={elevMonthData} margin={{ top: 5, right: 0, left: 0, bottom: 0 }}>
                 <defs>
                   <linearGradient id="colorElevation" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#14B8A6" stopOpacity={0.3}/>
-                    <stop offset="95%" stopColor="#14B8A6" stopOpacity={0}/>
+                    <stop offset="5%" stopColor="#14B8A6" stopOpacity={0.3} />
+                    <stop offset="95%" stopColor="#14B8A6" stopOpacity={0} />
                   </linearGradient>
                 </defs>
-                <YAxis domain={[0, 3000]} hide />
-                <Area type="monotone" dataKey="value" stroke="#14B8A6" strokeWidth={2} fillOpacity={1} fill="url(#colorElevation)" isAnimationActive={false} />
+                <YAxis domain={[0, elevMax + 50]} hide />
+                <Area
+                  type="monotone"
+                  dataKey="value"
+                  stroke="#14B8A6"
+                  strokeWidth={2}
+                  fillOpacity={1}
+                  fill="url(#colorElevation)"
+                  isAnimationActive={false}
+                />
               </AreaChart>
             </ResponsiveContainer>
           </div>
         </div>
         <div className="flex justify-between ml-8 mt-2 text-[10px] text-text-muted">
-          {elevationData.map((d) => (
-            <span key={d.name}>{d.name.toUpperCase()}</span>
+          {elevMonthData.map((d) => (
+            <span key={d.name}>{d.name}</span>
           ))}
         </div>
       </div>
