@@ -26,25 +26,18 @@ function decodePolyline(encoded: string): [number, number][] {
 
 // ─── TRAINING ZONES (valori fissi basati su FC Max) ──────────────────────────
 
-function getZones(maxHr: number) {
-  const z3min = Math.round(maxHr * 0.75);
-  const z4min = Math.round(maxHr * 0.82);
-  const z5min = Math.round(maxHr * 0.90);
-  const z2max = z3min - 1;
-  const z1max = Math.round(maxHr * 0.60);
+function getZones() {
   return [
-    { zone: "Z1", label: "Recupero",     range: `< ${z1max}`,              min: 0,     max: z1max,   bar: "from-blue-500/60 to-blue-500" },
-    { zone: "Z2", label: "Resistenza",   range: `${z1max + 1} – ${z2max}`, min: z1max + 1, max: z2max, bar: "from-green-500/60 to-green-500" },
-    { zone: "Z3", label: "Ritmo",        range: `${z3min} – ${z4min - 1}`, min: z3min, max: z4min - 1, bar: "from-yellow-400/60 to-yellow-400" },
-    { zone: "Z4", label: "Soglia",       range: `${z4min} – ${z5min - 1}`, min: z4min, max: z5min - 1, bar: "from-orange-500/60 to-orange-500" },
-    { zone: "Z5", label: "Anaerobico",   range: `> ${z5min}`,              min: z5min, max: maxHr + 20, bar: "from-red-500/60 to-red-500" },
+    { zone: "Z1", label: "Recupero",     range: "< 117",       min: 0,   max: 117, bar: "from-blue-500/60 to-blue-500" },
+    { zone: "Z2", label: "Resistenza",   range: "118 – 146",   min: 118, max: 146, bar: "from-green-500/60 to-green-500" },
+    { zone: "Z3", label: "Ritmo",        range: "147 – 160",   min: 147, max: 160, bar: "from-yellow-400/60 to-yellow-400" },
+    { zone: "Z4", label: "Soglia",       range: "161 – 175",   min: 161, max: 175, bar: "from-orange-500/60 to-orange-500" },
+    { zone: "Z5", label: "Anaerobico",   range: "> 176",       min: 176, max: 220, bar: "from-red-500/60 to-red-500" },
   ];
 }
 
-// Soglia Z2/Z3 per la regola 80/20
-function getSlowMaxHr(maxHr: number) {
-  return Math.round(maxHr * 0.75) - 1; // Z2 max
-}
+// Soglia Z2/Z3 per la regola 80/20: lente = avg HR <= 146
+const SLOW_MAX_HR = 146;
 
 // ─── HEATMAP ─────────────────────────────────────────────────────────────────
 
@@ -70,12 +63,21 @@ function buildHeatmapGrid(data: { date: string; km: number }[], weeksBack = 24) 
 }
 
 function heatmapColor(km: number) {
-  if (km === 0) return "bg-[#2A2A2A]";
-  if (km < 5) return "bg-[#10B981]/30";
-  if (km < 10) return "bg-[#10B981]/60";
-  if (km < 20) return "bg-[#10B981]/80";
-  return "bg-[#10B981]";
+  if (km === 0) return "bg-[#1A1A1A]";
+  if (km < 5) return "bg-[#064E3B]";
+  if (km < 10) return "bg-[#047857]";
+  if (km < 20) return "bg-[#10B981]";
+  return "bg-[#34D399]";
 }
+
+function heatmapGlow(km: number) {
+  if (km === 0) return "";
+  if (km < 5) return "shadow-[0_0_4px_rgba(16,185,129,0.15)]";
+  if (km < 10) return "shadow-[0_0_6px_rgba(16,185,129,0.25)]";
+  if (km < 20) return "shadow-[0_0_8px_rgba(16,185,129,0.35)]";
+  return "shadow-[0_0_10px_rgba(52,211,153,0.5)]";
+}
+
 
 // ─── IMAGE RESIZE HELPER ────────────────────────────────────────────────────
 
@@ -300,8 +302,8 @@ function HeroMap({ lastRun }: { lastRun: Run | null }) {
 
 // ─── 80/20 RULE COMPONENT ────────────────────────────────────────────────────
 
-function EightyTwentyRule({ runs, maxHr, period }: { runs: Run[]; maxHr: number; period: 7 | 14 }) {
-  const slowMaxHr = getSlowMaxHr(maxHr); // Z2 ceiling
+function EightyTwentyRule({ runs, period }: { runs: Run[]; period: 7 | 14 }) {
+  const slowMaxHr = SLOW_MAX_HR;
 
   const data = useMemo(() => {
     const today = new Date();
@@ -422,7 +424,11 @@ export function ProfileView() {
   }, [runsData]);
 
   const displayName = activeProfile?.name ?? "—";
-  const totalKm = activeProfile?.total_km ?? 0;
+  const totalKm = useMemo(() => {
+    const runs = runsData?.runs ?? [];
+    if (runs.length > 0) return runs.reduce((sum, r) => sum + (r.distance_km || 0), 0);
+    return activeProfile?.total_km ?? 0;
+  }, [runsData, activeProfile]);
   const raceGoal = activeProfile?.race_goal ?? "—";
   const level = activeProfile?.level ?? "—";
   const maxHr = activeProfile?.max_hr ?? 195;
@@ -430,8 +436,21 @@ export function ProfileView() {
   const profilePic = activeProfile?.profile_pic || activeProfile?.strava_profile_pic || "";
   const allRuns = runsData?.runs ?? [];
 
-  const heatmapGrid = useMemo(() => buildHeatmapGrid(heatmapData?.heatmap ?? [], 24), [heatmapData]);
-  const zones = useMemo(() => getZones(maxHr), [maxHr]);
+  const heatmapGrid = useMemo(() => {
+    // Usa dati API se disponibili, altrimenti costruisci da allRuns
+    if (heatmapData?.heatmap && heatmapData.heatmap.length > 0) {
+      return buildHeatmapGrid(heatmapData.heatmap, 24);
+    }
+    // Fallback: costruisci da allRuns
+    const runsMap: Record<string, number> = {};
+    for (const r of (runsData?.runs ?? [])) {
+      const d = r.date?.slice(0, 10);
+      if (d) runsMap[d] = (runsMap[d] || 0) + (r.distance_km || 0);
+    }
+    const fallback = Object.entries(runsMap).map(([date, km]) => ({ date, km }));
+    return buildHeatmapGrid(fallback, 24);
+  }, [heatmapData, runsData]);
+  const zones = useMemo(() => getZones(), [maxHr]);
 
   const handleStravaConnect = async () => {
     try {
@@ -528,31 +547,355 @@ export function ProfileView() {
           </div>
 
           {/* Consistency Heatmap */}
-          <div className="bg-[#181818] border border-[#2A2A2A] rounded-2xl p-6">
-            <div className="flex items-center justify-between mb-6">
-              <h2 className="text-lg font-bold text-white">Running Consistency</h2>
-              <span className="text-sm text-gray-400">Ultimi 6 mesi</span>
-            </div>
-            <div className="flex gap-1.5 overflow-x-auto pb-2">
-              <div className="flex flex-col gap-1.5 justify-between text-xs text-gray-500 font-medium pr-2 pt-0.5">
-                <span>Dom</span><span>Mar</span><span>Gio</span><span>Sab</span>
-              </div>
-              <div className="flex gap-1.5">
-                {heatmapGrid.map((week, wi) => (
-                  <div key={wi} className="flex flex-col gap-1.5">
-                    {week.map((day, di) => (
-                      <div key={di} className={`w-3.5 h-3.5 rounded-sm ${heatmapColor(day.km)} transition-all hover:ring-2 hover:ring-white/50 cursor-pointer`} title={day.km > 0 ? `${day.date}: ${day.km.toFixed(1)} km` : day.date} />
+          {(() => {
+            const flat = heatmapGrid.flat();
+            const activeDays = flat.filter(d => d.km > 0).length;
+            const totalDays = flat.length;
+            const pct = totalDays > 0 ? Math.round((activeDays / totalDays) * 100) : 0;
+            const totalKmHeat = flat.reduce((s, d) => s + d.km, 0);
+            // Calcola streak corrente (giorni consecutivi con corsa, partendo da oggi all'indietro)
+            const reversedFlat = [...flat].reverse();
+            let currentStreak = 0;
+            // Salta oggi se non ha ancora corso
+            const startIdx = reversedFlat[0]?.km === 0 ? 1 : 0;
+            for (let i = startIdx; i < reversedFlat.length; i++) {
+              if (reversedFlat[i].km > 0) currentStreak++;
+              else break;
+            }
+            // Best streak
+            let bestStreak = 0, tempStreak = 0;
+            for (const d of flat) {
+              if (d.km > 0) { tempStreak++; bestStreak = Math.max(bestStreak, tempStreak); }
+              else tempStreak = 0;
+            }
+            // Settimane attive (almeno 3 corse nella settimana)
+            const activeWeeks = heatmapGrid.filter(w => w.filter(d => d.km > 0).length >= 3).length;
+            // Media km nei giorni attivi
+            const avgKmActive = activeDays > 0 ? totalKmHeat / activeDays : 0;
+            // Giorno preferito (quale giorno della settimana corri di più)
+            const dayTotals = [0, 0, 0, 0, 0, 0, 0]; // Dom-Sab
+            for (const week of heatmapGrid) week.forEach((d, di) => { if (d.km > 0) dayTotals[di]++; });
+            const dayNames = ["Dom", "Lun", "Mar", "Mer", "Gio", "Ven", "Sab"];
+            const favDayIdx = dayTotals.indexOf(Math.max(...dayTotals));
+            const favDay = dayTotals[favDayIdx] > 0 ? dayNames[favDayIdx] : "—";
+
+            return (
+              <div className="bg-gradient-to-br from-[#181818] to-[#141414] border border-[#2A2A2A] rounded-2xl p-6 relative overflow-hidden">
+                {/* Ambient glow */}
+                <div className="absolute top-0 right-0 w-48 h-48 bg-[#10B981]/5 rounded-full blur-3xl pointer-events-none" />
+                <div className="absolute bottom-0 left-0 w-32 h-32 bg-[#10B981]/3 rounded-full blur-3xl pointer-events-none" />
+
+                {/* Header */}
+                <div className="flex items-center justify-between mb-5 relative">
+                  <div>
+                    <h2 className="text-lg font-bold text-white flex items-center gap-2">
+                      <div className="w-2 h-2 rounded-full bg-[#10B981] animate-pulse" />
+                      Running Consistency
+                    </h2>
+                    <p className="text-xs text-gray-500 mt-0.5">La tua costanza negli ultimi 6 mesi</p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <div className="bg-[#10B981]/10 px-3 py-1.5 rounded-lg flex items-center gap-1.5">
+                      <Activity className="w-3.5 h-3.5 text-[#10B981]" />
+                      <span className="text-xs font-bold text-[#10B981]">{activeDays} giorni</span>
+                    </div>
+                    <div className="bg-[#3B82F6]/10 px-3 py-1.5 rounded-lg">
+                      <span className="text-xs font-bold text-[#3B82F6]">{pct}%</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Heatmap grid */}
+                <div className="flex gap-[5px] overflow-x-auto pb-2 relative">
+                  <div className="flex flex-col gap-[5px] justify-between text-[10px] text-gray-600 font-medium pr-2 pt-0.5 flex-shrink-0">
+                    <span>Dom</span><span>Mar</span><span>Gio</span><span>Sab</span>
+                  </div>
+                  <div className="flex gap-[5px] flex-1">
+                    {heatmapGrid.map((week, wi) => (
+                      <div key={wi} className="flex flex-col gap-[5px] flex-1">
+                        {week.map((day, di) => (
+                          <div
+                            key={di}
+                            className={`aspect-square min-w-[10px] rounded-[3px] ${heatmapColor(day.km)} ${heatmapGlow(day.km)} transition-all duration-200 hover:scale-[1.5] hover:z-10 hover:ring-1 hover:ring-white/40 cursor-pointer`}
+                            title={day.km > 0 ? `${day.date}: ${day.km.toFixed(1)} km` : day.date}
+                          />
+                        ))}
+                      </div>
                     ))}
                   </div>
-                ))}
+                </div>
+
+                {/* Legend */}
+                <div className="flex items-center justify-end gap-2 mt-3 text-[10px] text-gray-500 font-medium">
+                  <span>Meno</span>
+                  <div className="flex gap-1">{[0, 3, 7, 12, 25].map((km, i) => <div key={i} className={`w-3 h-3 rounded-[3px] ${heatmapColor(km)} ${heatmapGlow(km)}`} />)}</div>
+                  <span>Di più</span>
+                </div>
+
+                {/* Stats grid */}
+                <div className="grid grid-cols-4 gap-3 mt-5 pt-4 border-t border-[#2A2A2A]/60 relative">
+                  <div className="bg-[#121212]/80 rounded-xl p-3 text-center">
+                    <div className="text-[10px] text-gray-500 uppercase tracking-wider font-bold mb-1">Streak</div>
+                    <div className="text-xl font-black text-[#10B981]">{currentStreak}</div>
+                    <div className="text-[10px] text-gray-600">giorni</div>
+                  </div>
+                  <div className="bg-[#121212]/80 rounded-xl p-3 text-center">
+                    <div className="text-[10px] text-gray-500 uppercase tracking-wider font-bold mb-1">Best Streak</div>
+                    <div className="text-xl font-black text-[#EAB308]">{bestStreak}</div>
+                    <div className="text-[10px] text-gray-600">giorni</div>
+                  </div>
+                  <div className="bg-[#121212]/80 rounded-xl p-3 text-center">
+                    <div className="text-[10px] text-gray-500 uppercase tracking-wider font-bold mb-1">Media/Run</div>
+                    <div className="text-xl font-black text-white">{avgKmActive.toFixed(1)}</div>
+                    <div className="text-[10px] text-gray-600">km</div>
+                  </div>
+                  <div className="bg-[#121212]/80 rounded-xl p-3 text-center">
+                    <div className="text-[10px] text-gray-500 uppercase tracking-wider font-bold mb-1">Giorno Top</div>
+                    <div className="text-xl font-black text-[#3B82F6]">{favDay}</div>
+                    <div className="text-[10px] text-gray-600">{dayTotals[favDayIdx] > 0 ? `${dayTotals[favDayIdx]} corse` : ""}</div>
+                  </div>
+                </div>
+
+                {/* Weekly frequency mini-bars */}
+                <div className="mt-4 pt-3 border-t border-[#2A2A2A]/40 relative">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-[10px] text-gray-500 font-bold uppercase tracking-wider">Frequenza per giorno</span>
+                    <span className="text-[10px] text-gray-600">{activeWeeks} settimane attive su {heatmapGrid.length}</span>
+                  </div>
+                  <div className="flex gap-2">
+                    {dayNames.map((name, i) => {
+                      const count = dayTotals[i];
+                      const maxCount = Math.max(...dayTotals, 1);
+                      const barPct = (count / maxCount) * 100;
+                      const isFav = i === favDayIdx && count > 0;
+                      return (
+                        <div key={name} className="flex-1 flex flex-col items-center gap-1">
+                          <div className="w-full h-12 bg-[#1A1A1A] rounded-lg flex items-end justify-center overflow-hidden">
+                            <div
+                              className={`w-full rounded-t-md transition-all duration-500 ${isFav ? "bg-gradient-to-t from-[#10B981] to-[#34D399] shadow-[0_0_8px_rgba(16,185,129,0.4)]" : "bg-gradient-to-t from-[#10B981]/30 to-[#10B981]/50"}`}
+                              style={{ height: `${Math.max(barPct, count > 0 ? 8 : 0)}%` }}
+                            />
+                          </div>
+                          <span className={`text-[10px] font-medium ${isFav ? "text-[#10B981]" : "text-gray-600"}`}>{name}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
               </div>
-            </div>
-            <div className="flex items-center justify-end gap-2 mt-4 text-xs text-gray-500 font-medium">
-              <span>Meno</span>
-              <div className="flex gap-1">{[0, 3, 7, 12, 25].map((km, i) => <div key={i} className={`w-3 h-3 rounded-sm ${heatmapColor(km)}`} />)}</div>
-              <span>Di più</span>
-            </div>
-          </div>
+            );
+          })()}
+
+          {/* ═══ Progressione del Passo ═══ */}
+          {(() => {
+            // Prendi le ultime 20 corse ordinate per data, con pace valido
+            const paceRuns = allRuns
+              .filter(r => r.avg_pace && r.distance_km >= 2 && r.date)
+              .sort((a, b) => a.date.localeCompare(b.date))
+              .slice(-20);
+
+            // Converti pace "M:SS" in secondi
+            const parsePace = (p: string) => {
+              const parts = p.split(":");
+              if (parts.length === 2) return parseInt(parts[0]) * 60 + parseInt(parts[1]);
+              return 0;
+            };
+            const fmtPace = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+
+            const pacePoints = paceRuns.map(r => ({
+              date: r.date,
+              pace: parsePace(r.avg_pace),
+              km: r.distance_km,
+              name: r.name || r.location || "",
+            })).filter(p => p.pace > 0);
+
+            if (pacePoints.length === 0) {
+              return (
+                <div className="bg-gradient-to-br from-[#181818] to-[#141414] border border-[#2A2A2A] rounded-2xl p-6">
+                  <h2 className="text-lg font-bold text-white flex items-center gap-2">
+                    <div className="w-2 h-2 rounded-full bg-[#8B5CF6]" />
+                    Progressione del Passo
+                  </h2>
+                  <p className="text-center text-gray-500 text-sm py-8">Sincronizza le tue corse per vedere la progressione</p>
+                </div>
+              );
+            }
+
+            const paces = pacePoints.map(p => p.pace);
+            const minPace = Math.min(...paces); // Più veloce (in basso nel grafico)
+            const maxPace = Math.max(...paces); // Più lento (in alto nel grafico)
+            const avgPace = Math.round(paces.reduce((s, p) => s + p, 0) / paces.length);
+            const bestPaceVal = minPace;
+            const recentAvg = pacePoints.length >= 5
+              ? Math.round(pacePoints.slice(-5).reduce((s, p) => s + p.pace, 0) / 5)
+              : avgPace;
+            const olderAvg = pacePoints.length >= 10
+              ? Math.round(pacePoints.slice(0, 5).reduce((s, p) => s + p.pace, 0) / 5)
+              : avgPace;
+            const improvement = olderAvg - recentAvg; // Positivo = migliorato
+
+            // Distribuzione distanze
+            const shortRuns = allRuns.filter(r => r.distance_km > 0 && r.distance_km < 5).length;
+            const medRuns = allRuns.filter(r => r.distance_km >= 5 && r.distance_km < 10).length;
+            const longRuns = allRuns.filter(r => r.distance_km >= 10 && r.distance_km < 20).length;
+            const ultraRuns = allRuns.filter(r => r.distance_km >= 20).length;
+            const totalCat = shortRuns + medRuns + longRuns + ultraRuns || 1;
+
+            // SVG chart dimensions
+            const chartW = 500, chartH = 140, padX = 0, padY = 10;
+            const range = maxPace - minPace || 60;
+            const yScale = (p: number) => padY + ((p - minPace) / range) * (chartH - 2 * padY);
+            const xScale = (i: number) => padX + (i / (pacePoints.length - 1 || 1)) * (chartW - 2 * padX);
+
+            // Polyline SVG path
+            const polyline = pacePoints.map((p, i) => `${xScale(i)},${yScale(p.pace)}`).join(" ");
+            // Gradient area
+            const areaPath = `M ${xScale(0)},${yScale(pacePoints[0].pace)} ` +
+              pacePoints.map((p, i) => `L ${xScale(i)},${yScale(p.pace)}`).join(" ") +
+              ` L ${xScale(pacePoints.length - 1)},${chartH} L ${xScale(0)},${chartH} Z`;
+
+            // Average line Y
+            const avgY = yScale(avgPace);
+
+            return (
+              <div className="bg-gradient-to-br from-[#181818] to-[#141414] border border-[#2A2A2A] rounded-2xl p-6 relative overflow-hidden">
+                {/* Ambient glow */}
+                <div className="absolute top-0 right-0 w-48 h-48 bg-[#8B5CF6]/5 rounded-full blur-3xl pointer-events-none" />
+                <div className="absolute bottom-0 left-0 w-32 h-32 bg-[#3B82F6]/4 rounded-full blur-3xl pointer-events-none" />
+
+                {/* Header */}
+                <div className="flex items-center justify-between mb-5 relative">
+                  <div>
+                    <h2 className="text-lg font-bold text-white flex items-center gap-2">
+                      <div className="w-2 h-2 rounded-full bg-[#8B5CF6]" />
+                      Progressione del Passo
+                    </h2>
+                    <p className="text-xs text-gray-500 mt-0.5">Evoluzione del passo medio sulle ultime {pacePoints.length} corse</p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {improvement > 0 && (
+                      <div className="bg-[#10B981]/10 px-3 py-1.5 rounded-lg flex items-center gap-1.5">
+                        <Zap className="w-3.5 h-3.5 text-[#10B981]" />
+                        <span className="text-xs font-bold text-[#10B981]">-{fmtPace(improvement)}/km</span>
+                      </div>
+                    )}
+                    {improvement < 0 && (
+                      <div className="bg-[#F43F5E]/10 px-3 py-1.5 rounded-lg">
+                        <span className="text-xs font-bold text-[#F43F5E]">+{fmtPace(-improvement)}/km</span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* SVG Chart */}
+                <div className="relative w-full" style={{ aspectRatio: `${chartW}/${chartH}` }}>
+                  <svg viewBox={`0 0 ${chartW} ${chartH}`} className="w-full h-full" preserveAspectRatio="none">
+                    <defs>
+                      <linearGradient id="paceGrad" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0%" stopColor="#8B5CF6" stopOpacity="0.3" />
+                        <stop offset="100%" stopColor="#8B5CF6" stopOpacity="0" />
+                      </linearGradient>
+                      <linearGradient id="lineGrad" x1="0" y1="0" x2="1" y2="0">
+                        <stop offset="0%" stopColor="#3B82F6" />
+                        <stop offset="50%" stopColor="#8B5CF6" />
+                        <stop offset="100%" stopColor="#EC4899" />
+                      </linearGradient>
+                    </defs>
+                    {/* Grid lines */}
+                    <line x1="0" y1={yScale(minPace)} x2={chartW} y2={yScale(minPace)} stroke="#2A2A2A" strokeWidth="0.5" />
+                    <line x1="0" y1={yScale(maxPace)} x2={chartW} y2={yScale(maxPace)} stroke="#2A2A2A" strokeWidth="0.5" />
+                    {/* Average dashed line */}
+                    <line x1="0" y1={avgY} x2={chartW} y2={avgY} stroke="#8B5CF6" strokeWidth="0.8" strokeDasharray="4 3" opacity="0.4" />
+                    {/* Area fill */}
+                    <path d={areaPath} fill="url(#paceGrad)" />
+                    {/* Line */}
+                    <polyline points={polyline} fill="none" stroke="url(#lineGrad)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
+                    {/* Dots */}
+                    {pacePoints.map((p, i) => {
+                      const isBest = p.pace === bestPaceVal;
+                      return (
+                        <circle
+                          key={i}
+                          cx={xScale(i)}
+                          cy={yScale(p.pace)}
+                          r={isBest ? 5 : 3}
+                          fill={isBest ? "#EAB308" : "#8B5CF6"}
+                          stroke={isBest ? "#FDE047" : "#121212"}
+                          strokeWidth={isBest ? 2 : 1.5}
+                        >
+                          <title>{p.date}: {fmtPace(p.pace)}/km — {p.km.toFixed(1)} km {p.name}</title>
+                        </circle>
+                      );
+                    })}
+                  </svg>
+                  {/* Y axis labels */}
+                  <span className="absolute top-0 left-1 text-[9px] text-[#10B981] font-bold">{fmtPace(minPace)}</span>
+                  <span className="absolute bottom-0 left-1 text-[9px] text-[#F43F5E] font-bold">{fmtPace(maxPace)}</span>
+                  <span className="absolute right-1 text-[9px] text-[#8B5CF6]/60 font-medium" style={{ top: `${(avgY / chartH) * 100}%` }}>media {fmtPace(avgPace)}</span>
+                </div>
+
+                {/* Date range */}
+                <div className="flex justify-between mt-1 text-[9px] text-gray-600">
+                  <span>{pacePoints[0]?.date}</span>
+                  <span>{pacePoints[pacePoints.length - 1]?.date}</span>
+                </div>
+
+                {/* Stats */}
+                <div className="grid grid-cols-4 gap-3 mt-5 pt-4 border-t border-[#2A2A2A]/60 relative">
+                  <div className="bg-[#121212]/80 rounded-xl p-3 text-center">
+                    <div className="text-[10px] text-gray-500 uppercase tracking-wider font-bold mb-1">Best Pace</div>
+                    <div className="text-lg font-black text-[#EAB308]">{fmtPace(bestPaceVal)}</div>
+                    <div className="text-[10px] text-gray-600">/km</div>
+                  </div>
+                  <div className="bg-[#121212]/80 rounded-xl p-3 text-center">
+                    <div className="text-[10px] text-gray-500 uppercase tracking-wider font-bold mb-1">Media</div>
+                    <div className="text-lg font-black text-white">{fmtPace(avgPace)}</div>
+                    <div className="text-[10px] text-gray-600">/km</div>
+                  </div>
+                  <div className="bg-[#121212]/80 rounded-xl p-3 text-center">
+                    <div className="text-[10px] text-gray-500 uppercase tracking-wider font-bold mb-1">Ultime 5</div>
+                    <div className="text-lg font-black text-[#8B5CF6]">{fmtPace(recentAvg)}</div>
+                    <div className="text-[10px] text-gray-600">/km</div>
+                  </div>
+                  <div className="bg-[#121212]/80 rounded-xl p-3 text-center">
+                    <div className="text-[10px] text-gray-500 uppercase tracking-wider font-bold mb-1">Trend</div>
+                    <div className={`text-lg font-black ${improvement > 0 ? "text-[#10B981]" : improvement < 0 ? "text-[#F43F5E]" : "text-gray-400"}`}>
+                      {improvement > 0 ? `−${improvement}s` : improvement < 0 ? `+${-improvement}s` : "="}
+                    </div>
+                    <div className="text-[10px] text-gray-600">{improvement > 0 ? "più veloce" : improvement < 0 ? "più lento" : "stabile"}</div>
+                  </div>
+                </div>
+
+                {/* Distribuzione distanze */}
+                <div className="mt-4 pt-3 border-t border-[#2A2A2A]/40 relative">
+                  <div className="flex items-center justify-between mb-3">
+                    <span className="text-[10px] text-gray-500 font-bold uppercase tracking-wider">Distribuzione Distanze</span>
+                    <span className="text-[10px] text-gray-600">{allRuns.filter(r => r.distance_km > 0).length} corse totali</span>
+                  </div>
+                  <div className="flex gap-1 h-3 rounded-full overflow-hidden mb-3">
+                    {shortRuns > 0 && <div className="bg-[#3B82F6] transition-all" style={{ width: `${(shortRuns / totalCat) * 100}%` }} />}
+                    {medRuns > 0 && <div className="bg-[#8B5CF6] transition-all" style={{ width: `${(medRuns / totalCat) * 100}%` }} />}
+                    {longRuns > 0 && <div className="bg-[#EC4899] transition-all" style={{ width: `${(longRuns / totalCat) * 100}%` }} />}
+                    {ultraRuns > 0 && <div className="bg-[#EAB308] transition-all" style={{ width: `${(ultraRuns / totalCat) * 100}%` }} />}
+                  </div>
+                  <div className="grid grid-cols-4 gap-2">
+                    {[
+                      { label: "< 5 km", count: shortRuns, color: "bg-[#3B82F6]" },
+                      { label: "5-10 km", count: medRuns, color: "bg-[#8B5CF6]" },
+                      { label: "10-20 km", count: longRuns, color: "bg-[#EC4899]" },
+                      { label: "20+ km", count: ultraRuns, color: "bg-[#EAB308]" },
+                    ].map((cat, i) => (
+                      <div key={i} className="flex items-center gap-1.5">
+                        <div className={`w-2 h-2 rounded-full ${cat.color} flex-shrink-0`} />
+                        <span className="text-[10px] text-gray-400">{cat.label}</span>
+                        <span className="text-[10px] font-bold text-white">{cat.count}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
 
           {/* Training Zones */}
           <div className="bg-[#181818] border border-[#2A2A2A] rounded-2xl p-6">
@@ -600,7 +943,7 @@ export function ProfileView() {
               <div>
                 <h2 className="text-lg font-bold text-white">Regola 80/20</h2>
                 <p className="text-xs text-gray-500 mt-0.5">
-                  Lente (Z1-Z2 ≤ {getSlowMaxHr(maxHr)} bpm) vs Veloci (Z3-Z5 &gt; {getSlowMaxHr(maxHr)} bpm)
+                  Lente (Z1-Z2 ≤ {SLOW_MAX_HR} bpm) vs Veloci (Z3-Z5 &gt; {SLOW_MAX_HR} bpm)
                 </p>
               </div>
               <div className="flex bg-[#121212] rounded-lg p-0.5">
@@ -617,7 +960,7 @@ export function ProfileView() {
                 ))}
               </div>
             </div>
-            <EightyTwentyRule runs={allRuns} maxHr={maxHr} period={rulePeriod} />
+            <EightyTwentyRule runs={allRuns} period={rulePeriod} />
           </div>
         </div>
 
