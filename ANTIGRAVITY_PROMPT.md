@@ -20,7 +20,7 @@ STACK OBBLIGATORIO (non cambiare):
 - Backend: FastAPI (Python 3.11) + Motor (MongoDB async)
 - Database: MongoDB Atlas
 - Auth: Strava OAuth 2.0
-- AI: Claude 4 Haiku + Gemini fallback
+- AI: Claude Sonnet 4.6 + Gemini fallback
 - Hosting: Render.com
 
 REGOLA FONDAMENTALE — MULTI-UTENTE:
@@ -31,7 +31,7 @@ Questa regola non ha eccezioni.
 
 STATO ATTUALE:
 Il progetto ha gia queste feature funzionanti:
-- Strava OAuth + Sync corse (445 corse sincronizzate)
+- Strava OAuth + Sync corse
 - Profilo con foto, training zones, regola 80/20, hero map
 - Running Consistency heatmap con dati reali
 - Progressione del Passo con grafico SVG

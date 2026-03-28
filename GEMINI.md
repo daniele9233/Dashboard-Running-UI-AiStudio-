@@ -16,7 +16,7 @@ Dashboard web per runner con integrazione Strava, analisi scientifica e coaching
 | Grafici | SVG custom dentro componenti React |
 | Backend | FastAPI (Python 3.11) + Motor (MongoDB async) |
 | Database | MongoDB Atlas (M0 Free) |
-| AI | Claude 4 Haiku (primario) + Google Gemini (fallback) |
+| AI | Claude Sonnet 4.6 (primario) + Google Gemini (fallback) |
 | Auth | Strava OAuth 2.0 → athlete_id |
 | Hosting | Render.com (backend), Vite dev server (frontend) |
 

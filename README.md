@@ -54,7 +54,7 @@ Basata sulla logica scientifica dell'app [CORRALEJO 2026](https://github.com/dan
 | Uvicorn | ASGI server |
 | Motor 3.x | MongoDB async driver |
 | httpx | HTTP client (Strava API) |
-| Claude 4 Haiku | AI Coach primario (Anthropic) |
+| Claude Sonnet 4.6 | AI Coach primario (Anthropic) |
 | Google Gemini | AI Coach fallback (gratuito) |
 | python-dotenv | Env variables |
 
@@ -143,7 +143,7 @@ web-app/
 - **Frontend** — SPA React con Vite, routing client-side, dark theme
 - **Backend** — Single-file FastAPI (`server.py`), async, tutte le route sotto `/api`
 - **Database** — MongoDB Atlas, ogni documento ha `athlete_id` per isolamento multi-utente
-- **AI** — Claude 4 Haiku (primario) + Google Gemini (fallback) per analisi corse
+- **AI** — Claude Sonnet 4.6 (primario) + Google Gemini (fallback) per analisi corse
 - **Strava** — OAuth 2.0 per sync attivita
 
 ---
@@ -550,7 +550,7 @@ Warm-up > Bronzo > Argento > Oro > Platino > Elite
 ## AI Coach
 
 ### Priorita
-1. **Claude 4 Haiku** (Anthropic) — risposte personalizzate, temperature 0.9
+1. **Claude Sonnet 4.6** (Anthropic) — risposte personalizzate, temperature 0.9
 2. **Google Gemini** — fallback gratuito
 3. **Analisi algoritmica** — fallback offline
 
@@ -592,7 +592,7 @@ Report settimanale automatico con: verdetto, positivi, miglioramenti, focus pros
 | `DB_NAME` | Nome database |
 | `STRAVA_CLIENT_ID` | Client ID app Strava |
 | `STRAVA_CLIENT_SECRET` | Client Secret app Strava |
-| `ANTHROPIC_API_KEY` | API key Claude 4 Haiku |
+| `ANTHROPIC_API_KEY` | API key Claude Sonnet 4.6 |
 | `GEMINI_API_KEY` | API key Google Gemini |
 
 ---

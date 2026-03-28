@@ -29,7 +29,7 @@ METIC LAB e una dashboard web per runner che integra dati Strava, analisi scient
 | Grafici | SVG custom + componenti React | Controllo totale, no dipendenze pesanti |
 | Backend | FastAPI (Python 3.11) | Async nativo, validazione Pydantic, auto-docs |
 | Database | MongoDB Atlas (Motor async) | Schema flessibile, free tier generoso |
-| AI | Claude 4 Haiku + Gemini (fallback) | Analisi personalizzate |
+| AI | Claude Sonnet 4.6 + Gemini (fallback) | Analisi personalizzate |
 | Auth | Strava OAuth 2.0 (fase 1), JWT (fase 2) | Identificazione utente tramite athlete_id |
 | Hosting | Render.com | Auto-deploy da GitHub |
 
@@ -189,7 +189,7 @@ weekly_reports    — Report settimanali AI
 - Data beneficio massimo
 
 **RF-RUN-05**: Analisi AI:
-- Claude 4 Haiku (primario), Gemini (fallback), algoritmico (fallback offline)
+- Claude Sonnet 4.6 (primario), Gemini (fallback), algoritmico (fallback offline)
 - 9 sezioni: intro, dati, classificazione, utilita obiettivo, positivi, gap, reality check, consigli, voto/10
 - Confronto con sessione pianificata, VDOT, settimane alla gara
 
@@ -269,7 +269,7 @@ Milestone, Costanza, Miglioramenti, Allenamento, Mezza, Scienza, Velocita, Fun
 ### 3.12 AI Coach
 
 **RF-AI-01**: Stack AI a 3 livelli:
-1. Claude 4 Haiku (Anthropic) — primario, temperature 0.9
+1. Claude Sonnet 4.6 (Anthropic) — primario, temperature 0.9
 2. Google Gemini — fallback gratuito
 3. Analisi algoritmica — fallback offline
 
@@ -332,5 +332,5 @@ Milestone, Costanza, Miglioramenti, Allenamento, Mezza, Scienza, Velocita, Fun
 - **Render Free Tier**: 512MB RAM, sleep dopo 15min, cold start ~50s
 - **MongoDB Atlas M0**: 512MB storage, 100 connessioni
 - **Strava API**: rate limit 100 richieste / 15 minuti per utente
-- **Claude Haiku**: costo ~$0.10/anno per utente medio (1-2 analisi/settimana)
+- **Claude Sonnet 4.6**: costo variabile per utilizzo (Anthropic API)
 - **Gemini**: gratuito ma con rate limit
