@@ -197,6 +197,7 @@ export interface BestEffort {
   time: string;
   pace: string;
   date: string;
+  run_id: string;
 }
 
 export interface BestEffortsResponse {

@@ -1,8 +1,9 @@
 import { useState, useMemo } from "react";
+import { useNavigate } from "react-router-dom";
 import { MapPin, Award, Clock, Activity, Zap, Flame, Calendar, ChevronRight, Edit3, Share2, RefreshCw, Link2, X, Check, Heart } from "lucide-react";
 import { useApi } from "../hooks/useApi";
 import { getProfile, updateProfile, getStravaAuthUrl, syncStrava, getBestEfforts, getHeatmap } from "../api";
-import type { Profile } from "../types/api";
+import type { Profile, BestEffort } from "../types/api";
 
 // ─── TRAINING ZONES ──────────────────────────────────────────────────────────
 
@@ -148,8 +149,9 @@ function EditModal({ profile, onClose, onSaved }: EditModalProps) {
 // ─── MAIN COMPONENT ───────────────────────────────────────────────────────────
 
 export function ProfileView() {
+  const navigate = useNavigate();
   const { data: profileData, loading } = useApi<Profile>(getProfile);
-  const { data: effortsData } = useApi<{ efforts: { distance: string; time: string; pace: string; date: string }[] }>(getBestEfforts);
+  const { data: effortsData } = useApi<{ efforts: BestEffort[] }>(getBestEfforts);
   const { data: heatmapData } = useApi<{ heatmap: { date: string; km: number }[] }>(getHeatmap);
 
   const [profile, setProfile] = useState<Profile | null>(null);
@@ -417,7 +419,11 @@ export function ProfileView() {
             ) : (
               <div className="space-y-3">
                 {efforts.map((pr, i) => (
-                  <div key={i} className="flex items-center justify-between p-3.5 bg-[#121212] border border-[#2A2A2A] rounded-xl hover:border-[#3A3A3A] transition-colors group cursor-pointer">
+                  <div
+                    key={i}
+                    onClick={() => pr.run_id && navigate(`/activities/${pr.run_id}`)}
+                    className="flex items-center justify-between p-3.5 bg-[#121212] border border-[#2A2A2A] rounded-xl hover:border-[#3A3A3A] transition-colors group cursor-pointer"
+                  >
                     <div>
                       <div className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-0.5">{pr.distance}</div>
                       <div className="text-lg font-bold text-white group-hover:text-[#3B82F6] transition-colors">{pr.time}</div>

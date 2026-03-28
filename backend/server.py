@@ -926,16 +926,21 @@ def _secs_to_time(total_s: float) -> str:
     return f"{m}:{s:02d}"
 
 
-def _best_effort_from_streams(streams: list, target_m: float) -> Optional[dict]:
+def _best_effort_from_streams(streams: list, target_m: float, actual_duration_s: float = 0) -> Optional[dict]:
     """
-    Find the fastest contiguous segment of exactly `target_m` meters
-    using sliding window with interpolation for precise timing.
+    Find the fastest contiguous segment of exactly `target_m` meters.
+    Calibrates cumulative time against actual run duration to fix
+    gaps from points with pace=None.
     """
-    if not streams or len(streams) < 2:
+    if not streams or len(streams) < 3:
         return None
 
     n = len(streams)
     dists = [s.get("d", 0) for s in streams]
+
+    # Total distance must cover the target
+    if dists[-1] - dists[0] < target_m * 0.95:
+        return None
 
     # Build cumulative time from per-point pace
     cum_t = [0.0] * n
@@ -947,9 +952,11 @@ def _best_effort_from_streams(streams: list, target_m: float) -> Optional[dict]:
         else:
             cum_t[i] = cum_t[i - 1]
 
-    # Total distance must be at least target_m
-    if dists[-1] - dists[0] < target_m * 0.95:
-        return None
+    # Calibrate: scale cumulative time so total matches actual run duration.
+    # This fixes "missing time" from points where pace was None.
+    if actual_duration_s > 0 and cum_t[-1] > 0:
+        scale = actual_duration_s / cum_t[-1]
+        cum_t = [t * scale for t in cum_t]
 
     best_time = None
     j = 0
@@ -958,12 +965,12 @@ def _best_effort_from_streams(streams: list, target_m: float) -> Optional[dict]:
             j += 1
 
         actual_dist = dists[j] - dists[i]
-        if actual_dist < target_m * 0.98:
+        if actual_dist < target_m * 0.95:
             break
 
         seg_time = cum_t[j] - cum_t[i]
 
-        # Interpolate: if j overshoots, subtract the overshoot time proportionally
+        # Interpolate: subtract overshoot time proportionally
         if actual_dist > target_m and j > 0:
             overshoot = actual_dist - target_m
             d_last = dists[j] - dists[j - 1]
@@ -983,15 +990,17 @@ def _best_effort_from_streams(streams: list, target_m: float) -> Optional[dict]:
 
 def _best_effort_from_splits(splits: list, target_km: int) -> Optional[dict]:
     """
-    Sliding window over per-km splits for distances that are
-    multiples of 1 km. More reliable when streams are missing.
+    Sliding window over per-km splits. Only considers full-distance
+    splits (ignores the last partial-km split).
     """
-    if not splits or len(splits) < target_km:
+    # Filter out partial splits (last split often < 1km)
+    full_splits = [s for s in splits if s.get("distance", 0) > 900]
+    if not full_splits or len(full_splits) < target_km:
         return None
 
     best_time = None
-    for i in range(len(splits) - target_km + 1):
-        window = splits[i : i + target_km]
+    for i in range(len(full_splits) - target_km + 1):
+        window = full_splits[i : i + target_km]
         seg_time = sum(s.get("elapsed_time", 0) for s in window)
         if seg_time > 0 and (best_time is None or seg_time < best_time):
             best_time = seg_time
@@ -1023,7 +1032,7 @@ async def get_best_efforts():
     bests: dict = {t[0]: None for t in targets}
 
     runs = await db.runs.find(
-        q, {"distance_km": 1, "duration_minutes": 1, "date": 1,
+        q, {"_id": 1, "distance_km": 1, "duration_minutes": 1, "date": 1,
             "streams": 1, "splits": 1, "avg_pace": 1}
     ).to_list(1000)
 
@@ -1032,6 +1041,8 @@ async def get_best_efforts():
         streams = r.get("streams") or []
         splits = r.get("splits") or []
         date = r.get("date", "")
+        run_id = str(r["_id"])
+        actual_s = r.get("duration_minutes", 0) * 60
 
         for label, target_m, min_km, splits_km in targets:
             if km < min_km:
@@ -1039,20 +1050,19 @@ async def get_best_efforts():
 
             effort = None
 
-            # 1) Try streams-based sliding window (most precise)
-            if streams:
-                effort = _best_effort_from_streams(streams, float(target_m))
-
-            # 2) Fallback: splits-based sliding window for whole-km distances
-            if not effort and splits_km and len(splits) >= splits_km:
+            # 1) Splits first for whole-km distances (most reliable — times from Strava)
+            if splits_km and len(splits) >= splits_km:
                 effort = _best_effort_from_splits(splits, splits_km)
 
-            # 3) Last fallback: if run distance is within 5% of target, use total time
-            if not effort and abs(km * 1000 - target_m) < target_m * 0.05:
-                total_s = r.get("duration_minutes", 0) * 60
-                if total_s > 0:
-                    pace_s = total_s / km
-                    effort = {"time_s": total_s, "pace_s": pace_s}
+            # 2) Streams sliding window (for sub-km or when splits aren't available)
+            if not effort and streams:
+                effort = _best_effort_from_streams(streams, float(target_m), actual_s)
+
+            # 3) Fallback: run distance within 10% of target → use total time
+            if not effort and abs(km * 1000 - target_m) <= target_m * 0.10:
+                if actual_s > 0:
+                    pace_s = actual_s / km
+                    effort = {"time_s": actual_s, "pace_s": pace_s}
 
             if effort and (bests[label] is None or effort["pace_s"] < bests[label]["pace_s"]):
                 bests[label] = {
@@ -1061,12 +1071,13 @@ async def get_best_efforts():
                     "pace": _secs_to_time(effort["pace_s"]) + "/km",
                     "pace_s": effort["pace_s"],
                     "date": date,
+                    "run_id": run_id,
                 }
 
     result = [v for v in bests.values() if v is not None]
     order = [t[0] for t in targets]
     result.sort(key=lambda x: order.index(x["distance"]) if x["distance"] in order else 99)
-    return {"efforts": [{k: v[k] for k in ("distance", "time", "pace", "date")} for v in result]}
+    return {"efforts": [{k: v[k] for k in ("distance", "time", "pace", "date", "run_id")} for v in result]}
 
 
 @app.get("/api/heatmap")
