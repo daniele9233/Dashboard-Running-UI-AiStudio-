@@ -83,12 +83,13 @@ export function RoutesView({ runId }: { runId?: string | null }) {
   const [mapMode, setMapMode] = useState<'pace' | 'hr' | 'elevation'>('pace');
   const [drawProgress, setDrawProgress] = useState(0);
   const [chartMetrics, setChartMetrics] = useState<Set<string>>(new Set(['pace']));
+  const [hoveredStreamIdx, setHoveredStreamIdx] = useState<number | null>(null);
 
   const toggleChartMetric = (metric: string) => {
     setChartMetrics(prev => {
       const next = new Set(prev);
       if (next.has(metric)) {
-        if (next.size > 1) next.delete(metric); // keep at least one active
+        if (next.size > 1) next.delete(metric);
       } else {
         next.add(metric);
       }
@@ -99,6 +100,9 @@ export function RoutesView({ runId }: { runId?: string | null }) {
   // Fetch real run data
   const { data: run, loading, error } = useApi<Run>(() => getRun(runId ?? ''));
 
+  // Per-point streams data
+  const streams: any[] = (run as any)?.streams ?? [];
+
   // Decode polyline
   const routeCoords = useMemo(() => {
     if (!run) return [];
@@ -108,6 +112,46 @@ export function RoutesView({ runId }: { runId?: string | null }) {
   }, [run]);
 
   const splits: Split[] = run?.splits ?? [];
+
+  // Chart data from streams (detailed) or fallback to splits
+  const chartData = useMemo(() => {
+    if (streams.length > 0) {
+      return streams.map((pt: any, i: number) => ({
+        idx: i,
+        dist: pt.d ? (pt.d / 1000).toFixed(1) : '',
+        pace: pt.pace ?? null,
+        hr: pt.hr ?? null,
+        cadence: pt.cad ?? null,
+        alt: pt.alt ?? null,
+        ll: pt.ll ?? null,
+      }));
+    }
+    // Fallback to splits
+    return splits.map((s) => ({
+      idx: s.km,
+      dist: `${s.km}`,
+      pace: paceToSeconds(s.pace),
+      hr: s.hr != null ? Math.round(s.hr) : null,
+      cadence: s.cadence ?? null,
+      alt: s.elevation_difference ?? null,
+      ll: null,
+    }));
+  }, [streams, splits]);
+
+  // Hovered point for map marker
+  const hoveredPoint = useMemo(() => {
+    if (hoveredStreamIdx == null || !chartData[hoveredStreamIdx]) return null;
+    const pt = chartData[hoveredStreamIdx];
+    if (pt.ll) return { lat: pt.ll[0], lng: pt.ll[1] };
+    // Fallback: interpolate from route coords
+    if (routeCoords.length > 0) {
+      const ratio = hoveredStreamIdx / Math.max(chartData.length - 1, 1);
+      const coordIdx = Math.min(Math.floor(ratio * routeCoords.length), routeCoords.length - 1);
+      const c = routeCoords[coordIdx];
+      return { lat: c[1], lng: c[0] };
+    }
+    return null;
+  }, [hoveredStreamIdx, chartData, routeCoords]);
 
   // Calculate map center from route
   const center = useMemo(() => {
@@ -301,6 +345,16 @@ export function RoutesView({ runId }: { runId?: string | null }) {
             </Marker>
           )}
 
+          {/* Chart cursor marker on map */}
+          {hoveredPoint && (
+            <Marker longitude={hoveredPoint.lng} latitude={hoveredPoint.lat}>
+              <div className="relative">
+                <div className="absolute -inset-4 animate-pulse bg-[#C0FF00]/20 rounded-full" />
+                <div className="w-4 h-4 bg-[#C0FF00] rounded-full border-2 border-white shadow-[0_0_20px_rgba(192,255,0,0.6)]" />
+              </div>
+            </Marker>
+          )}
+
           {/* Active split highlight */}
           {activeSplit !== null && routeCoords.length > 0 && (
             <Source id="active-split" type="geojson" data={{
@@ -458,8 +512,8 @@ export function RoutesView({ runId }: { runId?: string | null }) {
         </div>
       </div>
 
-      {/* OVERLAY: BOTTOM — Multi-metric chart with selectable metrics */}
-      {splits.length > 0 && (
+      {/* OVERLAY: BOTTOM — Detailed chart with cursor sync to map */}
+      {chartData.length > 0 && (
         <div className="absolute bottom-6 left-[380px] right-8 pointer-events-none">
           <div className="bg-[#0A0F1A]/90 backdrop-blur-2xl border border-white/[0.06] rounded-2xl shadow-2xl pointer-events-auto">
             {/* Chart header */}
@@ -493,123 +547,89 @@ export function RoutesView({ runId }: { runId?: string | null }) {
                 ))}
               </div>
 
-              {/* Elevation badge */}
-              <div className="flex items-center gap-2 px-3 py-1.5 bg-white/[0.04] rounded-lg">
-                <Mountain className="w-3.5 h-3.5 text-amber-400" />
-                <span className="text-xs font-black italic text-amber-400">{run.elevation_gain?.toFixed(0) ?? '—'}m</span>
-              </div>
+              {/* Hovered point values or elevation badge */}
+              {hoveredStreamIdx != null && chartData[hoveredStreamIdx] ? (
+                <div className="flex gap-5 items-center">
+                  {chartMetrics.has('pace') && chartData[hoveredStreamIdx].pace && (
+                    <div className="text-right">
+                      <div className="text-[7px] font-black text-gray-600 uppercase tracking-widest">Pace</div>
+                      <div className="text-sm font-black italic text-[#C0FF00]">
+                        {Math.floor(chartData[hoveredStreamIdx].pace / 60)}:{String(Math.round(chartData[hoveredStreamIdx].pace % 60)).padStart(2, '0')}/km
+                      </div>
+                    </div>
+                  )}
+                  {chartMetrics.has('hr') && chartData[hoveredStreamIdx].hr && (
+                    <div className="text-right">
+                      <div className="text-[7px] font-black text-gray-600 uppercase tracking-widest">HR</div>
+                      <div className="text-sm font-black italic text-[#F43F5E]">{Math.round(chartData[hoveredStreamIdx].hr)} bpm</div>
+                    </div>
+                  )}
+                  {chartMetrics.has('cadence') && chartData[hoveredStreamIdx].cadence && (
+                    <div className="text-right">
+                      <div className="text-[7px] font-black text-gray-600 uppercase tracking-widest">Cadence</div>
+                      <div className="text-sm font-black italic text-[#8B5CF6]">{Math.round(chartData[hoveredStreamIdx].cadence)} spm</div>
+                    </div>
+                  )}
+                  <div className="text-right">
+                    <div className="text-[7px] font-black text-gray-600 uppercase tracking-widest">Dist</div>
+                    <div className="text-sm font-black italic text-white">{chartData[hoveredStreamIdx].dist} km</div>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex items-center gap-2 px-3 py-1.5 bg-white/[0.04] rounded-lg">
+                  <Mountain className="w-3.5 h-3.5 text-amber-400" />
+                  <span className="text-xs font-black italic text-amber-400">{run.elevation_gain?.toFixed(0) ?? '—'}m</span>
+                </div>
+              )}
             </div>
 
             {/* Chart */}
-            <div className="h-32 px-4 pb-4">
+            <div className="h-36 px-4 pb-4">
               <ResponsiveContainer width="100%" height="100%">
                 <ComposedChart
-                  data={splits.map((s) => ({
-                    km: s.km,
-                    pace: paceToSeconds(s.pace),
-                    hr: s.hr != null ? Math.round(s.hr) : null,
-                    cadence: s.cadence ?? null,
-                  }))}
+                  data={chartData}
                   margin={{ top: 8, right: 12, bottom: 0, left: 12 }}
+                  onMouseMove={(e: any) => {
+                    if (e && e.activeTooltipIndex != null) setHoveredStreamIdx(e.activeTooltipIndex);
+                  }}
+                  onMouseLeave={() => setHoveredStreamIdx(null)}
                 >
                   <defs>
                     <linearGradient id="paceGrad" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor="#C0FF00" stopOpacity={0.25} />
-                      <stop offset="100%" stopColor="#C0FF00" stopOpacity={0.02} />
+                      <stop offset="0%" stopColor="#C0FF00" stopOpacity={0.2} />
+                      <stop offset="100%" stopColor="#C0FF00" stopOpacity={0.01} />
                     </linearGradient>
                     <linearGradient id="hrGrad" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor="#F43F5E" stopOpacity={0.15} />
-                      <stop offset="100%" stopColor="#F43F5E" stopOpacity={0.02} />
+                      <stop offset="0%" stopColor="#F43F5E" stopOpacity={0.12} />
+                      <stop offset="100%" stopColor="#F43F5E" stopOpacity={0.01} />
                     </linearGradient>
                     <linearGradient id="cadenceGrad" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor="#8B5CF6" stopOpacity={0.15} />
-                      <stop offset="100%" stopColor="#8B5CF6" stopOpacity={0.02} />
+                      <stop offset="0%" stopColor="#8B5CF6" stopOpacity={0.12} />
+                      <stop offset="100%" stopColor="#8B5CF6" stopOpacity={0.01} />
                     </linearGradient>
                   </defs>
-                  <CartesianGrid
-                    strokeDasharray="none"
-                    stroke="rgba(255,255,255,0.03)"
-                    vertical={false}
-                  />
+                  <CartesianGrid strokeDasharray="none" stroke="rgba(255,255,255,0.03)" vertical={false} />
                   <XAxis
-                    dataKey="km"
-                    tick={{ fontSize: 10, fill: '#374151', fontWeight: 800 }}
+                    dataKey="dist"
+                    tick={{ fontSize: 9, fill: '#374151', fontWeight: 800 }}
                     axisLine={{ stroke: 'rgba(255,255,255,0.06)' }}
                     tickLine={false}
-                    tickFormatter={(v) => `${v}`}
+                    interval={streams.length > 0 ? Math.floor(chartData.length / 12) : 0}
+                    tickFormatter={(v) => v ? `${v}` : ''}
                   />
                   <YAxis yAxisId="pace" orientation="left" hide reversed />
                   <YAxis yAxisId="hr" orientation="right" hide />
                   <YAxis yAxisId="cadence" hide />
-                  <Tooltip
-                    contentStyle={{
-                      backgroundColor: 'rgba(10,15,26,0.96)',
-                      border: '1px solid rgba(255,255,255,0.08)',
-                      borderRadius: '14px',
-                      padding: '12px 16px',
-                      boxShadow: '0 20px 40px rgba(0,0,0,0.5)',
-                    }}
-                    labelStyle={{ color: '#4B5563', fontSize: 9, fontWeight: 900, textTransform: 'uppercase' as const, letterSpacing: '0.15em', marginBottom: 6 }}
-                    itemStyle={{ fontSize: 12, fontWeight: 900, padding: '2px 0' }}
-                    formatter={(value: number, name: string) => {
-                      if (name === 'pace') {
-                        const m = Math.floor(value / 60);
-                        const s = value % 60;
-                        return [`${m}:${String(Math.round(s)).padStart(2, '0')}/km`, 'Pace'];
-                      }
-                      if (name === 'hr') return [`${Math.round(value)} bpm`, 'HR'];
-                      if (name === 'cadence') return [`${Math.round(value)} spm`, 'Cadence'];
-                      return [value, name];
-                    }}
-                    labelFormatter={(label) => `KM ${label}`}
-                    cursor={{ stroke: 'rgba(192,255,0,0.15)', strokeWidth: 1 }}
-                  />
+                  <Tooltip content={() => null} cursor={{ stroke: 'rgba(192,255,0,0.25)', strokeWidth: 1 }} />
 
-                  {/* Pace */}
                   {chartMetrics.has('pace') && (
-                    <Area
-                      yAxisId="pace"
-                      type="monotone"
-                      dataKey="pace"
-                      stroke="#C0FF00"
-                      strokeWidth={2.5}
-                      fill="url(#paceGrad)"
-                      dot={false}
-                      animationDuration={800}
-                      animationEasing="ease-out"
-                    />
+                    <Area yAxisId="pace" type="monotone" dataKey="pace" stroke="#C0FF00" strokeWidth={1.5} fill="url(#paceGrad)" dot={false} isAnimationActive={false} />
                   )}
-
-                  {/* Heart Rate */}
                   {chartMetrics.has('hr') && (
-                    <Area
-                      yAxisId="hr"
-                      type="monotone"
-                      dataKey="hr"
-                      stroke="#F43F5E"
-                      strokeWidth={2}
-                      fill="url(#hrGrad)"
-                      dot={false}
-                      animationDuration={1000}
-                      animationEasing="ease-out"
-                      connectNulls
-                    />
+                    <Area yAxisId="hr" type="monotone" dataKey="hr" stroke="#F43F5E" strokeWidth={1.5} fill="url(#hrGrad)" dot={false} isAnimationActive={false} connectNulls />
                   )}
-
-                  {/* Cadence */}
                   {chartMetrics.has('cadence') && (
-                    <Area
-                      yAxisId="cadence"
-                      type="monotone"
-                      dataKey="cadence"
-                      stroke="#8B5CF6"
-                      strokeWidth={2}
-                      fill="url(#cadenceGrad)"
-                      dot={false}
-                      animationDuration={1200}
-                      animationEasing="ease-out"
-                      connectNulls
-                    />
+                    <Area yAxisId="cadence" type="monotone" dataKey="cadence" stroke="#8B5CF6" strokeWidth={1.5} fill="url(#cadenceGrad)" dot={false} isAnimationActive={false} connectNulls />
                   )}
                 </ComposedChart>
               </ResponsiveContainer>

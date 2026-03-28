@@ -247,7 +247,7 @@ async def strava_sync():
             # Fetch detailed activity for splits + full polyline + streams
             splits = []
             full_polyline = ""
-            cadence_per_km = {}  # km_index -> avg cadence
+            streams_data = None  # per-point streams for detailed chart
 
             try:
                 detail_resp = await http.get(
@@ -258,27 +258,52 @@ async def strava_sync():
                     detail = detail_resp.json()
                     full_polyline = detail.get("map", {}).get("polyline", "") or summary_polyline
 
-                    # Fetch cadence stream
+                    # Fetch full streams (per-point data)
                     try:
                         streams_resp = await http.get(
                             f"https://www.strava.com/api/v3/activities/{strava_id}/streams",
                             headers=headers,
-                            params={"keys": "cadence,distance", "key_type": "stream"},
+                            params={
+                                "keys": "distance,heartrate,cadence,altitude,velocity_smooth,latlng",
+                                "key_type": "stream",
+                            },
                         )
                         if streams_resp.status_code == 200:
-                            streams = {s["type"]: s["data"] for s in streams_resp.json()}
-                            cadence_data = streams.get("cadence", [])
-                            distance_data = streams.get("distance", [])
-                            if cadence_data and distance_data:
-                                # Group cadence by km
-                                km_cadences: dict = {}
-                                for dist, cad in zip(distance_data, cadence_data):
-                                    km_idx = int(dist / 1000) + 1
-                                    km_cadences.setdefault(km_idx, []).append(cad)
-                                for km_idx, cads in km_cadences.items():
-                                    cadence_per_km[km_idx] = round(sum(cads) / len(cads) * 2)  # *2 for spm
+                            raw = {s["type"]: s["data"] for s in streams_resp.json()}
+                            dist = raw.get("distance", [])
+                            hr = raw.get("heartrate", [])
+                            cad = raw.get("cadence", [])
+                            alt = raw.get("altitude", [])
+                            vel = raw.get("velocity_smooth", [])
+                            latlng = raw.get("latlng", [])
+                            n = len(dist)
+
+                            # Downsample to ~200 points max for storage efficiency
+                            step = max(1, n // 200)
+                            streams_data = []
+                            for j in range(0, n, step):
+                                pt = {"d": round(dist[j], 1)}
+                                if j < len(hr): pt["hr"] = hr[j]
+                                if j < len(cad): pt["cad"] = round(cad[j] * 2)  # spm
+                                if j < len(alt): pt["alt"] = round(alt[j], 1)
+                                if j < len(vel) and vel[j] > 0:
+                                    pace_s = 1000 / vel[j]
+                                    pt["pace"] = round(pace_s, 1)  # sec/km
+                                if j < len(latlng): pt["ll"] = latlng[j]  # [lat, lng]
+                                streams_data.append(pt)
                     except Exception:
                         pass
+
+                    # Build cadence lookup from streams for splits
+                    cadence_per_km: dict = {}
+                    if streams_data:
+                        km_cads: dict = {}
+                        for pt in streams_data:
+                            if "cad" in pt and "d" in pt:
+                                km_idx = int(pt["d"] / 1000) + 1
+                                km_cads.setdefault(km_idx, []).append(pt["cad"])
+                        for km_idx, cads in km_cads.items():
+                            cadence_per_km[km_idx] = round(sum(cads) / len(cads))
 
                     for i, sp in enumerate(detail.get("splits_metric", []), 1):
                         splits.append({
@@ -309,6 +334,7 @@ async def strava_sync():
                 "avg_cadence": act.get("average_cadence"),
                 "elevation_gain": round(act.get("total_elevation_gain", 0), 1),
                 "splits": splits,
+                "streams": streams_data,  # per-point data: d, hr, cad, alt, pace, ll
                 "polyline": full_polyline or summary_polyline,
                 "start_latlng": start_latlng,
                 "plan_feedback": None,
