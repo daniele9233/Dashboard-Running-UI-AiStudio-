@@ -432,7 +432,9 @@ async def update_profile(request: Request):
 async def get_runs():
     athlete_id = await _get_athlete_id()
     q = {"athlete_id": athlete_id} if athlete_id else {}
-    cursor = db.runs.find(q).sort("date", -1)
+    # Exclude heavy fields (streams) from list endpoint to save memory
+    projection = {"streams": 0}
+    cursor = db.runs.find(q, projection).sort("date", -1)
     runs = await cursor.to_list(length=500)
     return {"runs": oids(runs)}
 
@@ -1029,18 +1031,18 @@ async def get_best_efforts():
         ("Maratona",      42195,  40.0, 42),
     ]
 
-    MIN_PACE_S = 150  # 2:30/km — anything faster is GPS glitch
+    MIN_PACE_S = 175  # 2:55/km — anything faster is GPS glitch
 
     bests: dict = {t[0]: None for t in targets}
 
+    # MEMORY FIX: do NOT load streams — only splits + metadata
     runs = await db.runs.find(
         q, {"_id": 1, "distance_km": 1, "duration_minutes": 1, "date": 1,
-            "streams": 1, "splits": 1, "avg_pace": 1}
+            "splits": 1}
     ).to_list(1000)
 
     for r in runs:
         km = r.get("distance_km", 0)
-        streams = r.get("streams") or []
         splits = r.get("splits") or []
         date = r.get("date", "")
         run_id = str(r["_id"])
@@ -1052,21 +1054,17 @@ async def get_best_efforts():
 
             effort = None
 
-            # 1) Splits first for whole-km distances (most reliable — times from Strava)
+            # 1) Splits for whole-km distances (most reliable — times from Strava)
             if splits_km and len(splits) >= splits_km:
                 effort = _best_effort_from_splits(splits, splits_km)
 
-            # 2) Streams sliding window (for sub-km or when splits aren't available)
-            if not effort and streams:
-                effort = _best_effort_from_streams(streams, float(target_m), actual_s)
-
-            # 3) Fallback: run distance within 10% of target → use total time
+            # 2) Fallback: run distance within 10% of target → use total time
             if not effort and abs(km * 1000 - target_m) <= target_m * 0.10:
                 if actual_s > 0:
                     pace_s = actual_s / km
                     effort = {"time_s": actual_s, "pace_s": pace_s}
 
-            # Discard GPS glitch results (faster than 2:30/km is not human)
+            # Discard GPS glitch results (faster than 2:55/km is not human)
             if effort and effort["pace_s"] < MIN_PACE_S:
                 effort = None
 
