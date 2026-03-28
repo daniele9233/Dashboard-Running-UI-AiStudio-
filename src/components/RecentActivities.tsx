@@ -1,5 +1,6 @@
 import { useMemo } from "react";
-import { Footprints, Timer, HeartPulse, MapPin, Zap, TrendingUp } from "lucide-react";
+import { useNavigate } from "react-router-dom";
+import { Footprints, Timer, HeartPulse, MapPin, Zap, TrendingUp, ChevronRight } from "lucide-react";
 import type { Run } from "../types/api";
 
 interface RecentActivitiesProps {
@@ -49,6 +50,8 @@ function getDayLabel(dateStr: string): string {
 // ─── Component ──────────────────────────────────────────────────────────────
 
 export function RecentActivities({ runs }: RecentActivitiesProps) {
+  const navigate = useNavigate();
+
   const groups = useMemo(() => {
     const sorted = [...runs]
       .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
@@ -79,28 +82,35 @@ export function RecentActivities({ runs }: RecentActivitiesProps) {
               <h4 className="text-[10px] font-semibold text-text-muted tracking-wider mb-3 uppercase">
                 {group}
               </h4>
-              <div className="space-y-4">
+              <div className="space-y-3">
                 {items.map((run) => {
                   const { Icon, bg, color, label } = getRunStyle(run.run_type);
                   const title = run.location || label;
                   return (
-                    <div key={run.id} className="flex items-center justify-between group cursor-pointer">
+                    <div
+                      key={run.id}
+                      onClick={() => navigate(`/activities/${run.id}`)}
+                      className="flex items-center justify-between group cursor-pointer rounded-lg px-2 py-1.5 -mx-2 hover:bg-white/5 transition-colors"
+                    >
                       <div className="flex items-center gap-3">
-                        <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${bg}`}>
+                        <div className={`w-10 h-10 rounded-lg flex items-center justify-center flex-shrink-0 ${bg}`}>
                           <Icon className={`w-5 h-5 ${color}`} />
                         </div>
                         <div>
-                          <div className="text-sm font-medium text-text-primary group-hover:text-accent transition-colors truncate max-w-[130px]">
+                          <div className="text-sm font-medium text-text-primary group-hover:text-accent transition-colors truncate max-w-[120px]">
                             {title}
                           </div>
                           <div className="text-xs text-text-muted">{formatRunDate(run.date)}</div>
                         </div>
                       </div>
-                      <div className="text-right">
-                        <div className="text-sm font-medium text-text-primary">
-                          +{run.distance_km.toFixed(1)} km
+                      <div className="flex items-center gap-2">
+                        <div className="text-right">
+                          <div className="text-sm font-medium text-text-primary">
+                            {run.distance_km.toFixed(1)} km
+                          </div>
+                          <div className="text-xs text-text-muted">{run.avg_pace}/km</div>
                         </div>
-                        <div className="text-xs text-text-muted">{label}</div>
+                        <ChevronRight className="w-4 h-4 text-text-muted group-hover:text-accent transition-colors" />
                       </div>
                     </div>
                   );

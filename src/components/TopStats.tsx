@@ -1,5 +1,9 @@
 import { useMemo } from "react";
-import { BarChart, Bar, AreaChart, Area, ResponsiveContainer, YAxis, Cell } from "recharts";
+import {
+  BarChart, Bar, AreaChart, Area,
+  ResponsiveContainer, YAxis, Cell,
+  XAxis, Tooltip,
+} from "recharts";
 import type { Run } from "../types/api";
 
 interface TopStatsProps {
@@ -37,10 +41,54 @@ function getWeekStart(date: Date): Date {
 const DAY_NAMES = ["Lun", "Mar", "Mer", "Gio", "Ven", "Sab", "Dom"];
 const DAY_COLORS = ["#8B5CF6", "#3B82F6", "#14B8A6", "#F59E0B", "#F43F5E", "#10B981", "#EC4899"];
 
+// ─── Tooltip per le barre dei giorni ─────────────────────────────────────────
+const DayTooltip = ({ active, payload }: any) => {
+  if (active && payload && payload.length) {
+    const { name, value } = payload[0].payload;
+    return (
+      <div className="bg-[#1E293B] border border-[#334155] px-3 py-2 rounded-lg shadow-xl text-xs">
+        <p className="text-text-muted mb-1 font-semibold">{name}</p>
+        <p className="text-text-primary font-bold">{value > 0 ? `${value} km` : "Riposo"}</p>
+      </div>
+    );
+  }
+  return null;
+};
+
+// ─── Tooltip per il passo ─────────────────────────────────────────────────────
+const PaceTooltip = ({ active, payload }: any) => {
+  if (active && payload && payload.length) {
+    const { name, value } = payload[0].payload;
+    const paceStr = value > 0 ? secsToPaceStr(value * 60) : null;
+    if (!paceStr) return null;
+    return (
+      <div className="bg-[#1E293B] border border-[#334155] px-3 py-2 rounded-lg shadow-xl text-xs">
+        <p className="text-text-muted mb-1 font-semibold">{name}</p>
+        <p className="text-text-primary font-bold">{paceStr} /km</p>
+      </div>
+    );
+  }
+  return null;
+};
+
+// ─── Tooltip per l'elevazione ─────────────────────────────────────────────────
+const ElevTooltip = ({ active, payload }: any) => {
+  if (active && payload && payload.length) {
+    const { name, value } = payload[0].payload;
+    return (
+      <div className="bg-[#1E293B] border border-[#334155] px-3 py-2 rounded-lg shadow-xl text-xs">
+        <p className="text-text-muted mb-1 font-semibold">{name}</p>
+        <p className="text-text-primary font-bold">{value.toLocaleString("it")} m</p>
+      </div>
+    );
+  }
+  return null;
+};
+
 // ─── Component ──────────────────────────────────────────────────────────────
 
 export function TopStats({ runs }: TopStatsProps) {
-  // ── Total Distance (questa settimana) ──────────────────────────────────────
+  // ── Total Distance (questa settimana) ─────────────────────────────────────
   const { weekDayData, thisWeekKm, weekPct } = useMemo(() => {
     const weekStart = getWeekStart(new Date());
     const lastWeekStart = new Date(weekStart);
@@ -57,7 +105,6 @@ export function TopStats({ runs }: TopStatsProps) {
     });
 
     const thisKm = parseFloat(dayData.reduce((s, d) => s + d.value, 0).toFixed(1));
-
     const lastKm = runs
       .filter((r) => {
         const d = r.date?.slice(0, 10);
@@ -68,7 +115,6 @@ export function TopStats({ runs }: TopStatsProps) {
       .reduce((sum, r) => sum + (r.distance_km || 0), 0);
 
     const pct = lastKm > 0 ? Math.round(((thisKm - lastKm) / lastKm) * 100) : null;
-
     return { weekDayData: dayData, thisWeekKm: thisKm, weekPct: pct };
   }, [runs]);
 
@@ -96,7 +142,7 @@ export function TopStats({ runs }: TopStatsProps) {
           : 0;
       const decimalMins = avgSecs > 0 ? parseFloat((avgSecs / 60).toFixed(3)) : 0;
       monthData.push({
-        name: d.toLocaleString("en", { month: "short" }).toUpperCase(),
+        name: d.toLocaleString("it", { month: "short" }).toUpperCase(),
         value: decimalMins,
       });
       if (i === 0) currSecs = avgSecs;
@@ -121,11 +167,14 @@ export function TopStats({ runs }: TopStatsProps) {
     };
   }, [runs]);
 
-  const paceYAxisLabels = useMemo(() => [
-    secsToPaceStr(paceMax * 60),
-    secsToPaceStr(((paceMin + paceMax) / 2) * 60),
-    secsToPaceStr(paceMin * 60),
-  ], [paceMin, paceMax]);
+  const paceYAxisLabels = useMemo(
+    () => [
+      secsToPaceStr(paceMax * 60),
+      secsToPaceStr(((paceMin + paceMax) / 2) * 60),
+      secsToPaceStr(paceMin * 60),
+    ],
+    [paceMin, paceMax]
+  );
 
   // ── Elevation Gain (quest'anno) ───────────────────────────────────────────
   const { elevMonthData, thisYearElev, elevPct, elevMax } = useMemo(() => {
@@ -143,7 +192,7 @@ export function TopStats({ runs }: TopStatsProps) {
         })
         .reduce((sum, r) => sum + (r.elevation_gain || 0), 0);
       monthData.push({
-        name: d.toLocaleString("en", { month: "short" }).toUpperCase(),
+        name: d.toLocaleString("it", { month: "short" }).toUpperCase(),
         value: Math.round(elev),
       });
     }
@@ -164,6 +213,7 @@ export function TopStats({ runs }: TopStatsProps) {
   // ─── Render ───────────────────────────────────────────────────────────────
   return (
     <div className="grid grid-cols-3 gap-4 mb-6">
+
       {/* ── Total Distance ── */}
       <div className="bg-bg-card border border-[#1E293B] rounded-xl p-5 flex flex-col justify-between">
         <div className="flex justify-between items-start mb-4">
@@ -174,15 +224,8 @@ export function TopStats({ runs }: TopStatsProps) {
                 {thisWeekKm > 0 ? `${thisWeekKm} km` : "0 km"}
               </span>
               {weekPct !== null && (
-                <span
-                  className={`text-xs px-1.5 py-0.5 rounded ${
-                    weekPct >= 0
-                      ? "text-[#14B8A6] bg-[#14B8A6]/10"
-                      : "text-[#F43F5E] bg-[#F43F5E]/10"
-                  }`}
-                >
-                  {weekPct >= 0 ? "+" : ""}
-                  {weekPct}%
+                <span className={`text-xs px-1.5 py-0.5 rounded ${weekPct >= 0 ? "text-[#14B8A6] bg-[#14B8A6]/10" : "text-[#F43F5E] bg-[#F43F5E]/10"}`}>
+                  {weekPct >= 0 ? "+" : ""}{weekPct}%
                 </span>
               )}
             </div>
@@ -191,30 +234,23 @@ export function TopStats({ runs }: TopStatsProps) {
         </div>
 
         <div className="h-24 w-full mt-auto">
-          {weekDayData.some((d) => d.value > 0) ? (
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={weekDayData} margin={{ top: 0, right: 0, left: 0, bottom: 0 }}>
-                <Bar dataKey="value" radius={[2, 2, 0, 0]}>
-                  {weekDayData.map((entry, index) => (
-                    <Cell key={index} fill={entry.color} opacity={entry.value > 0 ? 1 : 0.12} />
-                  ))}
-                </Bar>
-              </BarChart>
-            </ResponsiveContainer>
-          ) : (
-            <div className="h-full flex items-end pb-2">
-              <div className="w-full grid grid-cols-7 gap-1">
-                {DAY_NAMES.map((_, i) => (
-                  <div key={i} className="h-3 rounded-sm" style={{ backgroundColor: DAY_COLORS[i], opacity: 0.12 }} />
+          <ResponsiveContainer width="100%" height="100%">
+            <BarChart data={weekDayData} margin={{ top: 0, right: 0, left: 0, bottom: 0 }}>
+              <XAxis dataKey="name" hide />
+              <Tooltip
+                content={<DayTooltip />}
+                cursor={{ fill: "rgba(255,255,255,0.04)" }}
+              />
+              <Bar dataKey="value" radius={[2, 2, 0, 0]}>
+                {weekDayData.map((entry, index) => (
+                  <Cell key={index} fill={entry.color} opacity={entry.value > 0 ? 1 : 0.12} />
                 ))}
-              </div>
-            </div>
-          )}
+              </Bar>
+            </BarChart>
+          </ResponsiveContainer>
         </div>
         <div className="flex justify-between mt-2 text-[10px] text-text-muted">
-          {DAY_NAMES.map((d) => (
-            <span key={d}>{d}</span>
-          ))}
+          {DAY_NAMES.map((d) => <span key={d}>{d}</span>)}
         </div>
       </div>
 
@@ -228,15 +264,8 @@ export function TopStats({ runs }: TopStatsProps) {
                 {currentPace !== "--" ? `${currentPace} /km` : "--"}
               </span>
               {pacePct !== null && (
-                <span
-                  className={`text-xs px-1.5 py-0.5 rounded ${
-                    pacePct <= 0
-                      ? "text-[#14B8A6] bg-[#14B8A6]/10"
-                      : "text-[#F43F5E] bg-[#F43F5E]/10"
-                  }`}
-                >
-                  {pacePct >= 0 ? "+" : ""}
-                  {pacePct}%
+                <span className={`text-xs px-1.5 py-0.5 rounded ${pacePct <= 0 ? "text-[#14B8A6] bg-[#14B8A6]/10" : "text-[#F43F5E] bg-[#F43F5E]/10"}`}>
+                  {pacePct >= 0 ? "+" : ""}{pacePct}%
                 </span>
               )}
             </div>
@@ -245,24 +274,24 @@ export function TopStats({ runs }: TopStatsProps) {
         </div>
 
         <div className="h-24 w-full mt-auto relative">
-          <div className="absolute left-0 top-0 h-full flex flex-col justify-between text-[10px] text-text-muted pb-6">
-            {paceYAxisLabels.map((l, i) => (
-              <span key={i}>{l}</span>
-            ))}
+          <div className="absolute left-0 top-0 h-full flex flex-col justify-between text-[10px] text-text-muted pb-6 pointer-events-none">
+            {paceYAxisLabels.map((l, i) => <span key={i}>{l}</span>)}
           </div>
           <div className="ml-8 h-full">
             <ResponsiveContainer width="100%" height="100%">
-              <AreaChart
-                data={paceMonthData.filter((d) => d.value > 0)}
-                margin={{ top: 5, right: 0, left: 0, bottom: 0 }}
-              >
+              <AreaChart data={paceMonthData} margin={{ top: 5, right: 0, left: 0, bottom: 0 }}>
                 <defs>
                   <linearGradient id="colorPace" x1="0" y1="0" x2="0" y2="1">
                     <stop offset="5%" stopColor="#F43F5E" stopOpacity={0.3} />
                     <stop offset="95%" stopColor="#F43F5E" stopOpacity={0} />
                   </linearGradient>
                 </defs>
+                <XAxis dataKey="name" hide />
                 <YAxis domain={[paceMin, paceMax]} hide />
+                <Tooltip
+                  content={<PaceTooltip />}
+                  cursor={{ stroke: "rgba(255,255,255,0.1)", strokeWidth: 1 }}
+                />
                 <Area
                   type="monotone"
                   dataKey="value"
@@ -277,9 +306,7 @@ export function TopStats({ runs }: TopStatsProps) {
           </div>
         </div>
         <div className="flex justify-between ml-8 mt-2 text-[10px] text-text-muted">
-          {paceMonthData.map((d) => (
-            <span key={d.name}>{d.name}</span>
-          ))}
+          {paceMonthData.map((d) => <span key={d.name}>{d.name}</span>)}
         </div>
       </div>
 
@@ -293,15 +320,8 @@ export function TopStats({ runs }: TopStatsProps) {
                 {thisYearElev > 0 ? `${thisYearElev.toLocaleString("it")} m` : "0 m"}
               </span>
               {elevPct !== null && (
-                <span
-                  className={`text-xs px-1.5 py-0.5 rounded ${
-                    elevPct >= 0
-                      ? "text-[#14B8A6] bg-[#14B8A6]/10"
-                      : "text-[#F43F5E] bg-[#F43F5E]/10"
-                  }`}
-                >
-                  {elevPct >= 0 ? "+" : ""}
-                  {elevPct}%
+                <span className={`text-xs px-1.5 py-0.5 rounded ${elevPct >= 0 ? "text-[#14B8A6] bg-[#14B8A6]/10" : "text-[#F43F5E] bg-[#F43F5E]/10"}`}>
+                  {elevPct >= 0 ? "+" : ""}{elevPct}%
                 </span>
               )}
             </div>
@@ -310,7 +330,7 @@ export function TopStats({ runs }: TopStatsProps) {
         </div>
 
         <div className="h-24 w-full mt-auto relative">
-          <div className="absolute left-0 top-0 h-full flex flex-col justify-between text-[10px] text-text-muted pb-6">
+          <div className="absolute left-0 top-0 h-full flex flex-col justify-between text-[10px] text-text-muted pb-6 pointer-events-none">
             <span>{elevMax >= 1000 ? `${(elevMax / 1000).toFixed(1)}K` : elevMax}</span>
             <span>{elevMax >= 1000 ? `${(elevMax / 2000).toFixed(1)}K` : Math.round(elevMax / 2)}</span>
             <span>0</span>
@@ -324,7 +344,12 @@ export function TopStats({ runs }: TopStatsProps) {
                     <stop offset="95%" stopColor="#14B8A6" stopOpacity={0} />
                   </linearGradient>
                 </defs>
+                <XAxis dataKey="name" hide />
                 <YAxis domain={[0, elevMax + 50]} hide />
+                <Tooltip
+                  content={<ElevTooltip />}
+                  cursor={{ stroke: "rgba(255,255,255,0.1)", strokeWidth: 1 }}
+                />
                 <Area
                   type="monotone"
                   dataKey="value"
@@ -339,9 +364,7 @@ export function TopStats({ runs }: TopStatsProps) {
           </div>
         </div>
         <div className="flex justify-between ml-8 mt-2 text-[10px] text-text-muted">
-          {elevMonthData.map((d) => (
-            <span key={d.name}>{d.name}</span>
-          ))}
+          {elevMonthData.map((d) => <span key={d.name}>{d.name}</span>)}
         </div>
       </div>
     </div>
