@@ -755,7 +755,7 @@ def _calc_vdot(runs: list, max_hr: int = 190) -> Optional[float]:
         avg_hr = r.get("avg_hr")
         if avg_hr and avg_hr < 0.85 * max_hr:
             continue
-        speed_mpm = 1000 / pace_s
+        speed_mpm = 60000 / pace_s  # m/min — Daniels formula requires m/min
         vo2 = -4.60 + 0.182258 * speed_mpm + 0.000104 * speed_mpm ** 2
         pct_max = 0.8 + 0.1894393 * math.exp(-0.012778 * duration_min) + 0.2989558 * math.exp(-0.1932605 * duration_min)
         if pct_max > 0:
@@ -886,8 +886,8 @@ async def get_vdot_paces():
         disc = 0.182258 ** 2 + 4 * 0.000104 * (vo2 + 4.60)
         if disc < 0:
             return None
-        v = (-0.182258 + math.sqrt(disc)) / (2 * 0.000104)
-        return _format_pace(1000 / v) if v > 0 else None
+        v = (-0.182258 + math.sqrt(disc)) / (2 * 0.000104)  # m/min
+        return _format_pace(v / 60) if v > 0 else None  # convert m/min → m/s for _format_pace
 
     return {
         "vdot": vdot,
