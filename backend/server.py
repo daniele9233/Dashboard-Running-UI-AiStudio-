@@ -582,7 +582,7 @@ async def get_dashboard():
         }
 
     # Fitness / Freshness
-    ff_docs = await db.fitness_freshness.find().sort("date", -1).to_list(90)
+    ff_docs = await db.fitness_freshness.find(q).sort("date", -1).to_list(90)
     current_ff = None
     if ff_docs:
         latest = ff_docs[0]
