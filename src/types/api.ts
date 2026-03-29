@@ -226,10 +226,37 @@ export interface HeatmapResponse {
 
 // ─── ANALYTICS ───────────────────────────────────────────────────────────────
 
+export interface ZonePoint {
+  zone: string;
+  name: string;
+  pct: number;
+  minutes: number;
+}
+
+export interface GoalGap {
+  target: string;
+  race: string;
+  predicted: string | null;
+}
+
 export interface AnalyticsResponse {
   vdot: number | null;
   race_predictions: Record<string, string>;
-  pace_trend: unknown[];
-  zone_distribution: unknown[];
-  goal_gap: unknown | null;
+  pace_trend: { date: string; pace: string }[];
+  zone_distribution: ZonePoint[];
+  goal_gap: GoalGap | null;
+}
+
+// ─── VDOT PACES ──────────────────────────────────────────────────────────────
+
+export interface VdotPacesResponse {
+  vdot: number | null;
+  paces: {
+    easy: string | null;
+    marathon: string | null;
+    threshold: string | null;
+    interval: string | null;
+    repetition: string | null;
+  };
+  race_predictions: Record<string, string>;
 }

@@ -724,55 +724,85 @@ async def recalculate_fitness_freshness():
 #  ANALYTICS
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _calc_vdot(runs: list) -> Optional[float]:
-    """Estimate VDOT from best recent run using Daniels' formula (simplified)."""
-    if not runs:
-        return None
-    # Find best effort: shortest pace over significant distance
-    best = None
-    for r in runs:
-        if r.get("distance_km", 0) >= 3:
-            pace_parts = r.get("avg_pace", "99:99").split(":")
-            try:
-                pace_s = int(pace_parts[0]) * 60 + int(pace_parts[1])
-            except (ValueError, IndexError):
-                continue
-            if best is None or pace_s < best[1]:
-                best = (r, pace_s)
-    if not best:
-        return None
+def _calc_vdot(runs: list, max_hr: int = 190) -> Optional[float]:
+    """Estimate VDOT from best validated run using Daniels' formula (Jack Daniels 2003).
 
-    run, pace_sec = best
-    speed_mpm = 1000 / pace_sec  # meters per minute
-    duration_min = run.get("duration_minutes", 30)
-    # Simplified Daniels VO2 estimate
-    vo2 = -4.60 + 0.182258 * speed_mpm + 0.000104 * speed_mpm ** 2
-    pct_max = 0.8 + 0.1894393 * math.exp(-0.012778 * duration_min) + 0.2989558 * math.exp(-0.1932605 * duration_min)
-    if pct_max > 0:
-        return round(vo2 / pct_max, 1)
+    Validation rules (per README spec):
+    - Distance 4–21 km
+    - Pace 2:30–9:00/km (150–540 sec/km)
+    - HR >= 85% of max_hr (if available)
+    - Cap VDOT at 55 (amateur runner)
+    Returns the highest valid VDOT found across all runs.
+    """
+    best_vdot = None
+    for r in runs:
+        dist = r.get("distance_km", 0)
+        if dist < 4 or dist > 21:
+            continue
+        pace_str = r.get("avg_pace", "")
+        if not pace_str or ":" not in pace_str:
+            continue
+        try:
+            parts = pace_str.split(":")
+            pace_s = int(parts[0]) * 60 + int(parts[1])
+        except (ValueError, IndexError):
+            continue
+        if pace_s < 150 or pace_s > 540:
+            continue
+        duration_min = r.get("duration_minutes", 0) or 0
+        if duration_min < 5:
+            continue
+        avg_hr = r.get("avg_hr")
+        if avg_hr and avg_hr < 0.85 * max_hr:
+            continue
+        speed_mpm = 1000 / pace_s
+        vo2 = -4.60 + 0.182258 * speed_mpm + 0.000104 * speed_mpm ** 2
+        pct_max = 0.8 + 0.1894393 * math.exp(-0.012778 * duration_min) + 0.2989558 * math.exp(-0.1932605 * duration_min)
+        if pct_max > 0:
+            vdot = vo2 / pct_max
+            if best_vdot is None or vdot > best_vdot:
+                best_vdot = vdot
+    if best_vdot:
+        return round(min(best_vdot, 55.0), 1)
     return None
 
 
+def _vdot_to_race_time(vdot: float, dist_km: float) -> Optional[str]:
+    """Predict race finish time for a given distance using iterative Daniels inversion."""
+    if not vdot or vdot <= 0 or dist_km <= 0:
+        return None
+    t = dist_km * 1000 / ((vdot / 22) * 60)  # initial estimate (minutes)
+    for _ in range(30):
+        pct = 0.8 + 0.1894393 * math.exp(-0.012778 * t) + 0.2989558 * math.exp(-0.1932605 * t)
+        vo2 = vdot * pct
+        disc = 0.182258 ** 2 + 4 * 0.000104 * (vo2 + 4.60)
+        if disc < 0:
+            return None
+        v = (-0.182258 + math.sqrt(disc)) / (2 * 0.000104)
+        if v <= 0:
+            return None
+        t_new = (dist_km * 1000) / v
+        if abs(t_new - t) < 0.001:
+            break
+        t = t_new
+    total_s = round(t * 60)
+    h = total_s // 3600
+    m = (total_s % 3600) // 60
+    s = total_s % 60
+    if h > 0:
+        return f"{h}:{m:02d}:{s:02d}"
+    return f"{m}:{s:02d}"
+
+
 def _predict_race(vdot: float) -> dict:
-    """Simplified race time predictions from VDOT."""
+    """Race time predictions from VDOT using accurate Daniels iterative formula."""
     if not vdot:
         return {}
-    # Very rough predictions (minutes)
-    preds = {
-        "5K": 30 * (42 / vdot),
-        "10K": 62 * (42 / vdot),
-        "Half Marathon": 140 * (42 / vdot),
-        "Marathon": 300 * (42 / vdot),
-    }
     result = {}
-    for dist, mins in preds.items():
-        h = int(mins // 60)
-        m = int(mins % 60)
-        s = int((mins % 1) * 60)
-        if h > 0:
-            result[dist] = f"{h}:{m:02d}:{s:02d}"
-        else:
-            result[dist] = f"{m}:{s:02d}"
+    for label, dist in [("5K", 5.0), ("10K", 10.0), ("Half Marathon", 21.0975), ("Marathon", 42.195)]:
+        t = _vdot_to_race_time(vdot, dist)
+        if t:
+            result[label] = t
     return result
 
 
@@ -781,24 +811,40 @@ async def get_analytics():
     athlete_id = await _get_athlete_id()
     q = {"athlete_id": athlete_id} if athlete_id else {}
     runs = await db.runs.find(q).sort("date", -1).to_list(500)
-    vdot = _calc_vdot(runs)
+    profile = await db.profile.find_one(q)
+    max_hr = int(profile.get("max_hr", 190)) if profile else 190
+
+    vdot = _calc_vdot(runs, max_hr)
 
     # Pace trend (last 20 runs)
     pace_trend = []
     for r in reversed(runs[:20]):
         pace_trend.append({"date": r.get("date"), "pace": r.get("avg_pace")})
 
-    # Zone distribution (simplified from HR data)
+    # Zone distribution from real HR data (last 120 runs with HR)
+    zone_min = {"Z1": 0.0, "Z2": 0.0, "Z3": 0.0, "Z4": 0.0, "Z5": 0.0}
+    runs_with_hr = [r for r in runs[:120] if r.get("avg_hr") and r.get("duration_minutes")]
+    for r in runs_with_hr:
+        hr_pct = r["avg_hr"] / max_hr * 100
+        dur = r["duration_minutes"]
+        if hr_pct < 65:
+            zone_min["Z1"] += dur
+        elif hr_pct < 77:
+            zone_min["Z2"] += dur
+        elif hr_pct < 84:
+            zone_min["Z3"] += dur
+        elif hr_pct < 91:
+            zone_min["Z4"] += dur
+        else:
+            zone_min["Z5"] += dur
+    total_min = sum(zone_min.values()) or 1
+    zone_names = {"Z1": "Recovery", "Z2": "Easy", "Z3": "Tempo", "Z4": "Threshold", "Z5": "VO2max"}
     zone_dist = [
-        {"zone": "Z1 Recovery", "pct": 15},
-        {"zone": "Z2 Easy", "pct": 45},
-        {"zone": "Z3 Tempo", "pct": 20},
-        {"zone": "Z4 Threshold", "pct": 12},
-        {"zone": "Z5 VO2max", "pct": 8},
+        {"zone": k, "name": zone_names[k], "pct": round(zone_min[k] / total_min * 100, 1), "minutes": round(zone_min[k], 1)}
+        for k in ["Z1", "Z2", "Z3", "Z4", "Z5"]
     ]
 
     # Goal gap
-    profile = await db.profile.find_one(q)
     goal_gap = None
     if profile and profile.get("target_time") and vdot:
         goal_gap = {
@@ -828,21 +874,31 @@ async def get_vdot_paces():
     athlete_id = await _get_athlete_id()
     q = {"athlete_id": athlete_id} if athlete_id else {}
     runs = await db.runs.find(q).sort("date", -1).to_list(500)
-    vdot = _calc_vdot(runs)
+    profile = await db.profile.find_one(q)
+    max_hr = int(profile.get("max_hr", 190)) if profile else 190
+    vdot = _calc_vdot(runs, max_hr)
     if not vdot:
-        return {"vdot": None, "paces": {}}
+        return {"vdot": None, "paces": {}, "race_predictions": {}}
 
-    # Training paces from VDOT (simplified)
-    base = 1000 / ((vdot + 4.60) / 0.182258)  # sec/km at VO2
+    def pace_at_vo2_pct(pct: float) -> Optional[str]:
+        """Calculate training pace (sec/km) at a given % of VO2max."""
+        vo2 = vdot * pct
+        disc = 0.182258 ** 2 + 4 * 0.000104 * (vo2 + 4.60)
+        if disc < 0:
+            return None
+        v = (-0.182258 + math.sqrt(disc)) / (2 * 0.000104)
+        return _format_pace(1000 / v) if v > 0 else None
+
     return {
         "vdot": vdot,
         "paces": {
-            "easy": _format_pace(1000 / (base * 1.35)),
-            "marathon": _format_pace(1000 / (base * 1.15)),
-            "tempo": _format_pace(1000 / (base * 1.05)),
-            "interval": _format_pace(1000 / base),
-            "repetition": _format_pace(1000 / (base * 0.92)),
+            "easy":       pace_at_vo2_pct(0.65),  # E: 59–74% VO2max
+            "marathon":   pace_at_vo2_pct(0.80),  # M: 75–84% VO2max
+            "threshold":  pace_at_vo2_pct(0.88),  # T: 83–88% VO2max
+            "interval":   pace_at_vo2_pct(0.98),  # I: 95–100% VO2max
+            "repetition": pace_at_vo2_pct(1.10),  # R: 105–120% VO2max
         },
+        "race_predictions": _predict_race(vdot),
     }
 
 

@@ -10,6 +10,7 @@ import type {
   InjuryRiskResponse,
   SupercompensationResponse,
   AnalyticsResponse,
+  VdotPacesResponse,
   BestEffortsResponse,
   HeatmapResponse,
 } from '../types/api';
@@ -47,7 +48,7 @@ export const getAnalytics = () => api.get<AnalyticsResponse>('/api/analytics');
 
 export const getPredictionHistory = () => api.get<unknown>('/api/prediction-history');
 
-export const getVdotPaces = () => api.get<unknown>('/api/vdot/paces');
+export const getVdotPaces = () => api.get<VdotPacesResponse>('/api/vdot/paces');
 
 // ─── RECOVERY & RISK ─────────────────────────────────────────────────────────
 export const getRecoveryScore = () => api.get<RecoveryScoreResponse>('/api/recovery-score');
