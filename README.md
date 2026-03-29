@@ -174,6 +174,50 @@ METIC LAB e progettato per scalare da 1 a 1000+ utenti. Ogni utente e isolato tr
    - Cache in-memory per calcoli pesanti (best-efforts, analytics, VDOT)
    - Rate limiting per utente
 
+### Stato Attuale e Problemi Noti (Multi-Utente)
+
+> **IMPORTANTE — Leggere prima di aggiungere utenti**
+
+#### 1. `_get_athlete_id()` — BUG CRITICO per multi-utente
+
+La funzione attuale restituisce **sempre l'ultimo token inserito nel DB**, non l'utente autenticato nella sessione HTTP corrente:
+
+```python
+async def _get_athlete_id():
+    tok = await db.strava_tokens.find_one(sort=[("_id", -1)])
+    return tok.get("athlete_id") if tok else None
+```
+
+**Conseguenza**: con 2+ utenti, ogni richiesta API potrebbe restituire i dati dell'ultimo utente loggato, non di chi ha fatto la richiesta.
+
+**Soluzione**: Implementare **FASE 4.1 (JWT Auth)** — ogni richiesta HTTP porta un token JWT firmato con l'athlete_id dell'utente. `_get_athlete_id()` legge dal JWT, non dal DB.
+
+#### 2. Strava API App — Limiti "Development Mode"
+
+L'app Strava e registrata con le credenziali personali del developer (Client ID/Secret). Questo e corretto: qualsiasi utente Strava puo autorizzare la stessa app OAuth.
+
+**Pero**, le app Strava in modalita sviluppo hanno un **limite di 10 atleti unici**. Per superare questo limite:
+- Richiedere il "Production Access" su https://www.strava.com/settings/api
+- Compilare il modulo con descrizione dell'app, link alla privacy policy, ecc.
+- Strava approva (o rifiuta) manualmente
+
+#### 3. Rate Limits Strava API
+
+| Limite | Valore |
+|---|---|
+| Per 15 minuti | 100 richieste |
+| Per giorno | 1.000 richieste |
+
+Questi limiti sono **per app** (non per utente). Con 50 utenti che sincronizzano 200 corse ciascuno, si raggiunge facilmente il limite giornaliero. Soluzione: sync incrementale (solo nuove corse) + cache.
+
+#### 4. Infrastruttura Single-Instance
+
+| Risorsa | Attuale | Per 100+ utenti |
+|---|---|---|
+| Render Backend | Free (512MB, sleep 15min) | Piano Starter ($7/mese, no sleep) |
+| MongoDB Atlas | M0 Free (512MB) | M2 ($9/mese) o M10 ($57/mese) |
+| Strava App | Development (max 10 atleti) | Production (richiesta manuale) |
+
 ### Collezioni MongoDB (con `athlete_id`)
 | Collezione | Descrizione |
 |---|---|
@@ -324,6 +368,9 @@ Mappa con tutti i percorsi corsi (heatmap geografica)
 | 7 | Progressione del Passo: grafico SVG, distribuzione distanze | Fatto |
 | 8 | Hero Map: MapLibre con polyline ultima corsa | Fatto |
 | 9 | Best Efforts con navigazione a pagina corsa | Fatto |
+| 10 | **FASE 1.1** — Dashboard dati reali: TopStats, RecentActivities, MainChart, AnaerobicThreshold, FitnessFreshness collegati a MongoDB | Fatto |
+| 11 | **Dashboard UX** — Tooltip hover su tutti i grafici, click corsa > pagina mappa, selettore periodo (1S/4S/8S/12S/6M/1A/Tutto) | Fatto |
+| 12 | **FASE 2.1** — Fitness & Freshness TRIMP Lucia: calcolo scientifico CTL/ATL/TSB, grafico SVG custom interattivo, bottone ricalcola | Fatto |
 
 ---
 
@@ -334,7 +381,7 @@ Ogni feature sara implementata con logica multi-utente (dati isolati per `athlet
 ### Fase 1 — Core Features
 | # | Feature | Descrizione |
 |---|---|---|
-| 1 | Dashboard dati reali | Collegare tutti i widget a dati reali |
+| ~~1~~ | ~~Dashboard dati reali~~ | ~~Completata~~ |
 | 2 | VDOT Dinamico | Calcolo automatico dai migliori risultati, 5 zone Daniels |
 | 3 | Training Plan generatore | Piano personalizzato: obiettivo, livello, VDOT, periodizzazione 6 fasi |
 | 4 | Training Plan auto-adapt | 5 modelli scientifici: spike, ACSM 10%, Foster, Seiler 80/20, Mujika tapering |
@@ -344,7 +391,7 @@ Ogni feature sara implementata con logica multi-utente (dati isolati per `athlet
 ### Fase 2 — Advanced Analytics
 | # | Feature | Descrizione |
 |---|---|---|
-| 7 | Fitness & Freshness | Modello Banister: TRIMP Lucia, CTL 42gg, ATL 7gg, TSB, grafico interattivo |
+| ~~7~~ | ~~Fitness & Freshness~~ | ~~Completata~~ |
 | 8 | Soglia Anaerobica | Stima da corse threshold, trend storico |
 | 9 | Recovery Score | 4 fattori oggettivi + check-in mattutino (energia, sonno, dolori, umore) |
 | 10 | Injury Risk | 7 fattori ponderati: ACWR, WoW, intensita, recupero, Foster, ACSM 10% |
@@ -391,7 +438,8 @@ Tutti gli endpoint filtrano per `athlete_id` (dal token Strava in sessione).
 | GET | `/training-plan` | Piano allenamento |
 | GET | `/training-plan/current` | Settimana corrente |
 | PATCH | `/training-plan/session/complete` | Segna sessione completata |
-| GET | `/fitness-freshness` | Fitness & Freshness (Banister) |
+| GET | `/fitness-freshness` | Fitness & Freshness (CTL/ATL/TSB con TRIMP Lucia) |
+| POST | `/fitness-freshness/recalculate` | Ricalcola CTL/ATL/TSB da zero |
 | GET | `/analytics` | Statistiche avanzate |
 | GET | `/prediction-history` | Storico previsioni |
 | GET | `/vdot/paces` | VDOT + 5 passi Daniels |
@@ -623,6 +671,26 @@ uvicorn server:app --reload --port 8000
 ---
 
 ## Changelog
+
+### v0.7.0 — Marzo 2026
+- **FASE 2.1**: Fitness & Freshness con calcolo TRIMP Lucia scientifico
+  - Backend: `trimp = duration × hr_reserve × (0.64 × e^(1.92 × hr_reserve))`
+  - CTL (EMA 42gg), ATL (EMA 7gg), TSB = CTL − ATL
+  - Ricalcolo automatico ad ogni sync Strava
+  - Endpoint `POST /fitness-freshness/recalculate`
+  - Classificazione TSB: Fresco (>10), Neutro (0-10), Affaticato (-10-0), Sovrallenamento (<-10)
+- Frontend: grafico SVG custom (zero librerie chart), hover interattivo con tooltip
+- Fix: filtro `athlete_id` mancante su fitness_freshness nel dashboard endpoint
+- Documentata architettura multi-utente: bug `_get_athlete_id()`, limiti Strava dev mode, rate limits
+
+### v0.6.0 — Marzo 2026
+- **FASE 1.1**: Dashboard dati reali — tutti i widget collegati a MongoDB
+  - TopStats: km settimana, avg pace mensile, elevation gain anno (con % variazione)
+  - RecentActivities: ultime 20 corse reali raggruppate per giorno
+  - MainChart: volume 12 settimane stacked per tipo corsa (easy/tempo/intervals/long/race)
+  - AnaerobicThreshold: stima soglia da corse threshold/tempo
+  - FitnessFreshness: CTL/ATL/TSB reali dal backend
+- **Dashboard UX**: tooltip hover su tutti i grafici, click corsa naviga a pagina mappa, selettore periodo (1S/4S/8S/12S/6M/1A/Tutto)
 
 ### v0.5.0 — Marzo 2026
 - Profile redesign: Running Consistency heatmap, Progressione del Passo
