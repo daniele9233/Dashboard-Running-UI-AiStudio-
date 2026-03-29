@@ -16,11 +16,11 @@ const PAD = { top: 16, right: 16, bottom: 28, left: 8 };
 const CW = SVG_W - PAD.left - PAD.right;
 const CH = SVG_H - PAD.top - PAD.bottom;
 
-// ─── Colori ──────────────────────────────────────────────────────────────────
-const CLR_CTL = "#f97316"; // arancione
-const CLR_ATL = "#9ca3af"; // grigio
-const CLR_TSB_POS = "#22c55e"; // verde
-const CLR_TSB_NEG = "#ef4444"; // rosso
+// ─── Colori (palette sito) ────────────────────────────────────────────────────
+const CLR_CTL = "#3B82F6";     // blu — condizione fisica
+const CLR_ATL = "#F43F5E";     // rosso — affaticamento
+const CLR_TSB_POS = "#14B8A6"; // teal — forma positiva
+const CLR_TSB_NEG = "#8B5CF6"; // viola — forma negativa
 
 // ─── Utilities ───────────────────────────────────────────────────────────────
 
@@ -32,10 +32,10 @@ function tsbStatusLabel(tsb: number): string {
 }
 
 function tsbStatusColor(tsb: number): string {
-  if (tsb > 10) return "#22c55e";
-  if (tsb > 0) return "#eab308";
-  if (tsb > -10) return "#f97316";
-  return "#ef4444";
+  if (tsb > 10) return "#14B8A6"; // teal — Fresco
+  if (tsb > 0) return "#F59E0B";  // amber — Neutro
+  if (tsb > -10) return "#8B5CF6"; // viola — Affaticato
+  return "#F43F5E";                // rosso — Sovrallenamento
 }
 
 interface ChartPoint {
@@ -290,7 +290,7 @@ export function FitnessFreshness({ fitnessFreshness, currentFf, prevCtl }: Fitne
       {/* ── Header ── */}
       <div className="flex items-center justify-between mb-6">
         <div className="flex items-center gap-2">
-          <Activity className="w-5 h-5 text-[#f97316]" />
+          <Activity className="w-5 h-5 text-[#3B82F6]" />
           <h2 className="text-lg font-bold tracking-wider uppercase text-text-primary">
             Fitness &amp; Freshness
           </h2>
@@ -406,10 +406,10 @@ export function FitnessFreshness({ fitnessFreshness, currentFf, prevCtl }: Fitne
       {/* ── Info TSB ── */}
       <div className="grid grid-cols-4 gap-3 mt-4 text-[10px]">
         {[
-          { label: "Fresco", range: "TSB > 10", color: "#22c55e", desc: "Pronto per gara/test" },
-          { label: "Neutro", range: "TSB 0–10", color: "#eab308", desc: "Buon allenamento" },
-          { label: "Affaticato", range: "TSB −10–0", color: "#f97316", desc: "Mantieni il ritmo" },
-          { label: "Sovrallenamento", range: "TSB < −10", color: "#ef4444", desc: "Recupera" },
+          { label: "Fresco", range: "TSB > 10", color: "#14B8A6", desc: "Pronto per gara/test" },
+          { label: "Neutro", range: "TSB 0–10", color: "#F59E0B", desc: "Buon allenamento" },
+          { label: "Affaticato", range: "TSB −10–0", color: "#8B5CF6", desc: "Mantieni il ritmo" },
+          { label: "Sovrallenamento", range: "TSB < −10", color: "#F43F5E", desc: "Recupera" },
         ].map(({ label, range, color, desc }) => (
           <div
             key={label}
