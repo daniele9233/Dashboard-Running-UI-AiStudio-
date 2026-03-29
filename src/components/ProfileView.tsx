@@ -338,6 +338,13 @@ function EightyTwentyRule({ runs, period }: { runs: Run[]; period: 7 | 14 }) {
 
   return (
     <div className="space-y-4">
+      {/* Period summary */}
+      <div className="text-xs text-gray-500">
+        {data.runCount > 0
+          ? <span>{data.runCount} corse con FC negli ultimi <span className="text-white font-bold">{period}</span> giorni — {data.total.toFixed(1)} km totali</span>
+          : <span>Nessuna corsa con FC negli ultimi <span className="text-white font-bold">{period}</span> giorni</span>
+        }
+      </div>
       {/* Donut-style bar */}
       <div className="relative h-5 bg-[#2A2A2A] rounded-full overflow-hidden">
         <div
@@ -395,8 +402,98 @@ function EightyTwentyRule({ runs, period }: { runs: Run[]; period: 7 | 14 }) {
         </div>
       )}
 
-      {data.runCount === 0 && (
-        <p className="text-center text-xs text-gray-500 py-2">Nessuna corsa con HR negli ultimi {period} giorni</p>
+    </div>
+  );
+}
+
+// ─── PACE PROGRESSION CHART ──────────────────────────────────────────────────
+
+interface PacePoint {
+  date: string;
+  pace: number;
+  km: number;
+  name: string;
+}
+
+function PaceProgressionChart({ pacePoints }: { pacePoints: PacePoint[] }) {
+  const [hovered, setHovered] = useState<number | null>(null);
+
+  const fmt = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+  const chartW = 500, chartH = 140, padX = 0, padY = 10;
+  const paces = pacePoints.map(p => p.pace);
+  const minPace = Math.min(...paces);
+  const maxPace = Math.max(...paces);
+  const avgPace = Math.round(paces.reduce((s, p) => s + p, 0) / paces.length);
+  const range = maxPace - minPace || 60;
+  const yS = (p: number) => padY + ((p - minPace) / range) * (chartH - 2 * padY);
+  const xS = (i: number) => padX + (i / (pacePoints.length - 1 || 1)) * (chartW - 2 * padX);
+  const avgY = yS(avgPace);
+  const polyline = pacePoints.map((p, i) => `${xS(i)},${yS(p.pace)}`).join(" ");
+  const areaPath = `M ${xS(0)},${yS(pacePoints[0].pace)} ` +
+    pacePoints.map((p, i) => `L ${xS(i)},${yS(p.pace)}`).join(" ") +
+    ` L ${xS(pacePoints.length - 1)},${chartH} L ${xS(0)},${chartH} Z`;
+  const hp = hovered !== null ? pacePoints[hovered] : null;
+
+  return (
+    <div className="relative w-full" style={{ aspectRatio: `${chartW}/${chartH}` }}>
+      <svg viewBox={`0 0 ${chartW} ${chartH}`} className="w-full h-full" preserveAspectRatio="none">
+        <defs>
+          <linearGradient id="paceGrad" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="#8B5CF6" stopOpacity="0.3" />
+            <stop offset="100%" stopColor="#8B5CF6" stopOpacity="0" />
+          </linearGradient>
+          <linearGradient id="lineGrad" x1="0" y1="0" x2="1" y2="0">
+            <stop offset="0%" stopColor="#3B82F6" />
+            <stop offset="50%" stopColor="#8B5CF6" />
+            <stop offset="100%" stopColor="#EC4899" />
+          </linearGradient>
+        </defs>
+        <line x1="0" y1={yS(minPace)} x2={chartW} y2={yS(minPace)} stroke="#2A2A2A" strokeWidth="0.5" />
+        <line x1="0" y1={yS(maxPace)} x2={chartW} y2={yS(maxPace)} stroke="#2A2A2A" strokeWidth="0.5" />
+        <line x1="0" y1={avgY} x2={chartW} y2={avgY} stroke="#8B5CF6" strokeWidth="0.8" strokeDasharray="4 3" opacity="0.4" />
+        <path d={areaPath} fill="url(#paceGrad)" />
+        <polyline points={polyline} fill="none" stroke="url(#lineGrad)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
+        {hovered !== null && (
+          <line x1={xS(hovered)} y1={0} x2={xS(hovered)} y2={chartH} stroke="#ffffff" strokeWidth="0.5" opacity="0.25" strokeDasharray="3 2" />
+        )}
+        {pacePoints.map((p, i) => {
+          const isBest = p.pace === minPace;
+          const isHov = hovered === i;
+          return (
+            <circle
+              key={i}
+              cx={xS(i)}
+              cy={yS(p.pace)}
+              r={isHov ? 6 : isBest ? 5 : 3}
+              fill={isHov ? "#C0FF00" : isBest ? "#EAB308" : "#8B5CF6"}
+              stroke={isHov ? "#C0FF00" : isBest ? "#FDE047" : "#121212"}
+              strokeWidth={isHov ? 2 : isBest ? 2 : 1.5}
+              style={{ cursor: "pointer" }}
+              onMouseEnter={() => setHovered(i)}
+              onMouseLeave={() => setHovered(null)}
+            />
+          );
+        })}
+      </svg>
+      {/* Y axis labels */}
+      <span className="absolute top-0 left-1 text-[9px] text-[#10B981] font-bold">{fmt(minPace)}</span>
+      <span className="absolute bottom-0 left-1 text-[9px] text-[#F43F5E] font-bold">{fmt(maxPace)}</span>
+      <span className="absolute right-1 text-[9px] text-[#8B5CF6]/60 font-medium" style={{ top: `${(avgY / chartH) * 100}%` }}>media {fmt(avgPace)}</span>
+      {/* Tooltip */}
+      {hp !== null && hovered !== null && (
+        <div
+          className="absolute z-20 bg-[#1E1E1E] border border-[#3A3A3A] rounded-lg px-3 py-2 pointer-events-none text-xs shadow-xl whitespace-nowrap"
+          style={{
+            left: `${(xS(hovered) / chartW) * 100}%`,
+            top: `${(yS(hp.pace) / chartH) * 100}%`,
+            transform: hovered < pacePoints.length / 2 ? "translate(10px, -50%)" : "translate(calc(-100% - 10px), -50%)",
+          }}
+        >
+          <div className="text-gray-400 mb-0.5">{hp.date}</div>
+          <div className="font-bold text-white text-sm">{fmt(hp.pace)}<span className="text-gray-400 text-xs font-normal"> /km</span></div>
+          <div className="text-gray-400">{hp.km.toFixed(1)} km</div>
+          {hp.name && <div className="text-gray-500 truncate max-w-[130px]">{hp.name}</div>}
+        </div>
       )}
     </div>
   );
@@ -706,7 +803,7 @@ export function ProfileView() {
               date: r.date,
               pace: parsePace(r.avg_pace),
               km: r.distance_km,
-              name: r.name || r.location || "",
+              name: r.location || "",
             })).filter(p => p.pace > 0);
 
             if (pacePoints.length === 0) {
@@ -741,21 +838,6 @@ export function ProfileView() {
             const ultraRuns = allRuns.filter(r => r.distance_km >= 20).length;
             const totalCat = shortRuns + medRuns + longRuns + ultraRuns || 1;
 
-            // SVG chart dimensions
-            const chartW = 500, chartH = 140, padX = 0, padY = 10;
-            const range = maxPace - minPace || 60;
-            const yScale = (p: number) => padY + ((p - minPace) / range) * (chartH - 2 * padY);
-            const xScale = (i: number) => padX + (i / (pacePoints.length - 1 || 1)) * (chartW - 2 * padX);
-
-            // Polyline SVG path
-            const polyline = pacePoints.map((p, i) => `${xScale(i)},${yScale(p.pace)}`).join(" ");
-            // Gradient area
-            const areaPath = `M ${xScale(0)},${yScale(pacePoints[0].pace)} ` +
-              pacePoints.map((p, i) => `L ${xScale(i)},${yScale(p.pace)}`).join(" ") +
-              ` L ${xScale(pacePoints.length - 1)},${chartH} L ${xScale(0)},${chartH} Z`;
-
-            // Average line Y
-            const avgY = yScale(avgPace);
 
             return (
               <div className="bg-gradient-to-br from-[#181818] to-[#141414] border border-[#2A2A2A] rounded-2xl p-6 relative overflow-hidden">
@@ -788,51 +870,7 @@ export function ProfileView() {
                 </div>
 
                 {/* SVG Chart */}
-                <div className="relative w-full" style={{ aspectRatio: `${chartW}/${chartH}` }}>
-                  <svg viewBox={`0 0 ${chartW} ${chartH}`} className="w-full h-full" preserveAspectRatio="none">
-                    <defs>
-                      <linearGradient id="paceGrad" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="0%" stopColor="#8B5CF6" stopOpacity="0.3" />
-                        <stop offset="100%" stopColor="#8B5CF6" stopOpacity="0" />
-                      </linearGradient>
-                      <linearGradient id="lineGrad" x1="0" y1="0" x2="1" y2="0">
-                        <stop offset="0%" stopColor="#3B82F6" />
-                        <stop offset="50%" stopColor="#8B5CF6" />
-                        <stop offset="100%" stopColor="#EC4899" />
-                      </linearGradient>
-                    </defs>
-                    {/* Grid lines */}
-                    <line x1="0" y1={yScale(minPace)} x2={chartW} y2={yScale(minPace)} stroke="#2A2A2A" strokeWidth="0.5" />
-                    <line x1="0" y1={yScale(maxPace)} x2={chartW} y2={yScale(maxPace)} stroke="#2A2A2A" strokeWidth="0.5" />
-                    {/* Average dashed line */}
-                    <line x1="0" y1={avgY} x2={chartW} y2={avgY} stroke="#8B5CF6" strokeWidth="0.8" strokeDasharray="4 3" opacity="0.4" />
-                    {/* Area fill */}
-                    <path d={areaPath} fill="url(#paceGrad)" />
-                    {/* Line */}
-                    <polyline points={polyline} fill="none" stroke="url(#lineGrad)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
-                    {/* Dots */}
-                    {pacePoints.map((p, i) => {
-                      const isBest = p.pace === bestPaceVal;
-                      return (
-                        <circle
-                          key={i}
-                          cx={xScale(i)}
-                          cy={yScale(p.pace)}
-                          r={isBest ? 5 : 3}
-                          fill={isBest ? "#EAB308" : "#8B5CF6"}
-                          stroke={isBest ? "#FDE047" : "#121212"}
-                          strokeWidth={isBest ? 2 : 1.5}
-                        >
-                          <title>{p.date}: {fmtPace(p.pace)}/km — {p.km.toFixed(1)} km {p.name}</title>
-                        </circle>
-                      );
-                    })}
-                  </svg>
-                  {/* Y axis labels */}
-                  <span className="absolute top-0 left-1 text-[9px] text-[#10B981] font-bold">{fmtPace(minPace)}</span>
-                  <span className="absolute bottom-0 left-1 text-[9px] text-[#F43F5E] font-bold">{fmtPace(maxPace)}</span>
-                  <span className="absolute right-1 text-[9px] text-[#8B5CF6]/60 font-medium" style={{ top: `${(avgY / chartH) * 100}%` }}>media {fmtPace(avgPace)}</span>
-                </div>
+                <PaceProgressionChart pacePoints={pacePoints} />
 
                 {/* Date range */}
                 <div className="flex justify-between mt-1 text-[9px] text-gray-600">
@@ -950,6 +988,7 @@ export function ProfileView() {
                 {([7, 14] as const).map(p => (
                   <button
                     key={p}
+                    type="button"
                     onClick={() => setRulePeriod(p)}
                     className={`px-3 py-1.5 rounded-md text-xs font-bold transition-colors ${
                       rulePeriod === p ? "bg-[#3B82F6] text-white" : "text-gray-500 hover:text-gray-300"

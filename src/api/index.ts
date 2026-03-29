@@ -13,6 +13,7 @@ import type {
   VdotPacesResponse,
   BestEffortsResponse,
   HeatmapResponse,
+  AdaptResponse,
 } from '../types/api';
 
 // ─── PROFILE ────────────────────────────────────────────────────────────────
@@ -38,6 +39,12 @@ export const getCurrentWeek = () => api.get<TrainingPlanResponse['weeks'][0]>('/
 
 export const toggleSessionComplete = (weekId: string, sessionIndex: number, completed: boolean) =>
   api.patch('/api/training-plan/session/complete', { week_id: weekId, session_index: sessionIndex, completed });
+
+export const generateTrainingPlan = (data: { goal_race: string; weeks_to_race: number }) =>
+  api.post<{ ok: boolean; weeks_generated: number }>('/api/training-plan/generate', data);
+
+export const adaptTrainingPlan = () =>
+  api.post<AdaptResponse>('/api/training-plan/adapt');
 
 // ─── FITNESS & FRESHNESS ─────────────────────────────────────────────────────
 export const getFitnessFreshness = () => api.get<FitnessFreshnessResponse>('/api/fitness-freshness');

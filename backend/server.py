@@ -617,20 +617,24 @@ async def get_dashboard():
 
 @app.get("/api/training-plan")
 async def get_training_plan():
-    cursor = db.training_plan.find().sort("week_number", 1)
+    athlete_id = await _get_athlete_id()
+    q = {"athlete_id": athlete_id} if athlete_id else {}
+    cursor = db.training_plan.find(q).sort("week_number", 1)
     weeks = await cursor.to_list(length=100)
     return {"weeks": oids(weeks)}
 
 
 @app.get("/api/training-plan/current")
 async def get_current_week():
+    athlete_id = await _get_athlete_id()
+    q = {"athlete_id": athlete_id} if athlete_id else {}
     today = dt.date.today().isoformat()
     doc = await db.training_plan.find_one(
-        {"week_start": {"$lte": today}, "week_end": {"$gte": today}}
+        {**q, "week_start": {"$lte": today}, "week_end": {"$gte": today}}
     )
     if not doc:
-        # Fallback to latest week
-        doc = await db.training_plan.find_one(sort=[("week_number", -1)])
+        candidates = await db.training_plan.find(q).sort("week_number", -1).to_list(1)
+        doc = candidates[0] if candidates else None
     if not doc:
         return JSONResponse({"error": "no_plan"}, status_code=404)
     return oid(doc)
@@ -659,6 +663,561 @@ async def toggle_session_complete(request: Request):
         await db.training_plan.update_one(filter_q, {"$set": {"sessions": sessions}})
 
     return {"ok": True}
+
+
+# ─── Training Plan — generation helpers ──────────────────────────────────────
+
+def _tp_daniels_paces(vdot: float) -> dict:
+    """Compute Daniels training paces from VDOT."""
+    def pace_at_pct(pct: float) -> Optional[str]:
+        vo2 = vdot * pct
+        disc = 0.182258 ** 2 + 4 * 0.000104 * (vo2 + 4.60)
+        if disc < 0:
+            return None
+        v = (-0.182258 + math.sqrt(disc)) / (2 * 0.000104)  # m/min
+        return _format_pace(v / 60) if v > 0 else None
+    return {
+        "easy":       pace_at_pct(0.65),
+        "marathon":   pace_at_pct(0.80),
+        "threshold":  pace_at_pct(0.88),
+        "interval":   pace_at_pct(0.98),
+        "repetition": pace_at_pct(1.10),
+    }
+
+
+def _tp_quality_session(phase: str, goal: str, dist_km: float,
+                         paces: Optional[dict]) -> tuple:
+    """Return (type, title, description, pace) for the weekly quality session."""
+    p = paces or {}
+    ep = p.get("easy") or "6:00"
+    mp = p.get("marathon") or "5:20"
+    tp = p.get("threshold") or "5:00"
+    ip = p.get("interval") or "4:30"
+    rp = p.get("repetition") or "4:10"
+
+    if phase == "Base Aerobica":
+        return ("easy", "Corsa Aerobica",
+                f"Corsa facile a ritmo di conversazione. Passo {ep}/km, sforzo 4–5/10.", ep)
+
+    if phase == "Sviluppo":
+        if goal == "Marathon":
+            return ("tempo", "Progressivo Maratona",
+                    f"15 min riscaldamento · 25 min @ {mp}/km (passo maratona) · 10 min defaticamento.", mp)
+        return ("tempo", "Corsa a Soglia",
+                f"15 min riscaldamento · 20–25 min continui @ {tp}/km · 10 min defaticamento.", tp)
+
+    if phase == "Intensità":
+        if goal == "5K":
+            return ("intervals", "Intervalli 400 m",
+                    f"2 km riscaldamento · 12×400 m @ {rp}/km con 90 s recupero · 2 km defaticamento.", rp)
+        if goal == "10K":
+            return ("intervals", "Intervalli 800 m",
+                    f"2 km riscaldamento · 6×800 m @ {ip}/km con 90 s recupero · 2 km defaticamento.", ip)
+        if goal == "Half Marathon":
+            return ("intervals", "Intervalli 1000 m",
+                    f"2 km riscaldamento · 5×1000 m @ {ip}/km con 2 min recupero · 2 km defaticamento.", ip)
+        return ("intervals", "Cruise Intervals",
+                f"2 km riscaldamento · 3×3 km @ {tp}/km con 1 min recupero · 2 km defaticamento.", tp)
+
+    if phase == "Specifico":
+        if goal == "5K":
+            return ("intervals", "Gare di Allenamento",
+                    f"2 km riscaldamento · 4×1200 m @ {ip}/km con 3 min recupero · 2 km defaticamento.", ip)
+        if goal == "10K":
+            return ("intervals", "Specifici 10K",
+                    f"2 km riscaldamento · 8×1 km @ {ip}/km con 90 s recupero · 2 km defaticamento.", ip)
+        if goal == "Half Marathon":
+            cont = round(dist_km * 0.55, 1)
+            return ("tempo", "Ritmo Gara HM",
+                    f"2 km riscaldamento · {cont} km continui @ {tp}/km · 2 km defaticamento.", tp)
+        mp_km = round(dist_km * 0.65, 1)
+        return ("tempo", "Passo Maratona",
+                f"2 km riscaldamento · {mp_km} km @ {mp}/km · 2 km defaticamento.", mp)
+
+    if phase == "Taper":
+        return ("easy", "Easy + Strides",
+                f"Corsa facile {round(dist_km, 1)} km @ {ep}/km con 4×100 m progressivi alla fine.", ep)
+
+    # Gara week
+    return ("easy", "Corsa Sciolta",
+            f"Corsa leggera di attivazione {round(dist_km, 1)} km a passo {ep}/km.", ep)
+
+
+def _tp_build_sessions(week_start, week_km: float, phase: str, goal: str,
+                       paces: Optional[dict]) -> list:
+    """Build sessions list for a training week."""
+    from datetime import timedelta
+    day_names = ["Lun", "Mar", "Mer", "Gio", "Ven", "Sab", "Dom"]
+    p = paces or {}
+    ep = p.get("easy") or "6:00"
+
+    # Km distribution per day (Mon=0…Sun=6)
+    if goal == "5K":
+        dist_map = {0: 0.20, 1: 0.25, 3: 0.20, 5: 0.35}
+    elif goal == "10K":
+        dist_map = {0: 0.20, 1: 0.22, 2: 0.15, 3: 0.18, 5: 0.25}
+    elif goal == "Half Marathon":
+        dist_map = {0: 0.20, 1: 0.18, 2: 0.15, 3: 0.17, 5: 0.30}
+    else:  # Marathon
+        dist_map = {0: 0.18, 1: 0.15, 2: 0.15, 3: 0.15, 4: 0.12, 5: 0.25}
+
+    sessions = []
+    for day_offset in range(7):
+        session_date = week_start + timedelta(days=day_offset)
+
+        if day_offset not in dist_map:
+            sessions.append({
+                "day": day_names[day_offset],
+                "date": session_date.isoformat(),
+                "type": "rest",
+                "title": "Riposo",
+                "description": "Giorno di riposo. Recupero attivo: stretching o camminata leggera.",
+                "target_distance_km": 0,
+                "target_pace": None,
+                "target_duration_min": None,
+                "completed": False,
+                "run_id": None,
+            })
+            continue
+
+        dist_km = round(week_km * dist_map[day_offset], 1)
+
+        if day_offset == 1:  # Tuesday = quality session
+            s_type, title, desc, pace = _tp_quality_session(phase, goal, dist_km, paces)
+        elif day_offset == 5:  # Saturday = long run
+            s_type, title, pace = "long", "Corsa Lunga", ep
+            desc = f"Corsa lunga {dist_km} km a passo {ep}/km. Mantieni conversazione, idratati bene."
+        else:
+            s_type, title, pace = "easy", "Corsa Facile", ep
+            desc = f"Corsa facile {dist_km} km a passo {ep}/km. Sforzo percepito 4–5/10."
+
+        try:
+            pp = pace.split(":")
+            dur: Optional[int] = round(dist_km * (int(pp[0]) * 60 + int(pp[1])) / 60)
+        except Exception:
+            dur = None
+
+        sessions.append({
+            "day": day_names[day_offset],
+            "date": session_date.isoformat(),
+            "type": s_type,
+            "title": title,
+            "description": desc,
+            "target_distance_km": dist_km,
+            "target_pace": pace,
+            "target_duration_min": dur,
+            "completed": False,
+            "run_id": None,
+        })
+
+    return sessions
+
+
+def _generate_plan_weeks(goal_race: str, weeks_total: int, max_weekly_km: float,
+                          level: str, paces: Optional[dict], athlete_id) -> list:
+    """Generate periodized training plan and return list of week documents."""
+    from datetime import date, timedelta
+
+    weeks_total = max(8, min(int(weeks_total), 32))
+
+    if weeks_total <= 10:
+        raw_phases = [
+            ("Base Aerobica", 0.40), ("Intensità", 0.35),
+            ("Taper", 0.15), ("Gara", 0.10),
+        ]
+    elif weeks_total <= 16:
+        raw_phases = [
+            ("Base Aerobica", 0.30), ("Sviluppo", 0.20), ("Intensità", 0.25),
+            ("Taper", 0.15), ("Gara", 0.10),
+        ]
+    else:
+        raw_phases = [
+            ("Base Aerobica", 0.25), ("Sviluppo", 0.20), ("Intensità", 0.20),
+            ("Specifico", 0.15), ("Taper", 0.12), ("Gara", 0.08),
+        ]
+
+    # Integer week allocation (always sums to weeks_total)
+    phase_alloc = []
+    remaining = weeks_total
+    for i, (name, frac) in enumerate(raw_phases):
+        n = max(1, round(frac * weeks_total)) if i < len(raw_phases) - 1 else max(1, remaining)
+        remaining -= n
+        phase_alloc.append((name, n))
+
+    # Start from the next Monday
+    today = date.today()
+    days_ahead = (7 - today.weekday()) % 7 or 7
+    start_date = today + timedelta(days=days_ahead)
+
+    level_pct = {"beginner": 0.50, "intermediate": 0.60, "advanced": 0.65}.get(level.lower(), 0.55)
+    current_km = max(15.0, max_weekly_km * level_pct)
+
+    phase_descs = {
+        "Base Aerobica": "Costruzione della base aerobica con corse facili e progressive.",
+        "Sviluppo":      "Sviluppo della soglia aerobica con progressivi e corse a ritmo.",
+        "Intensità":     "Sviluppo di velocità e VO₂max con interval training.",
+        "Specifico":     "Lavoro specifico per la gara target con ritmi di gara.",
+        "Taper":         "Riduzione del volume per arrivare fresco al giorno della gara.",
+        "Gara":          "Settimana della gara. Mantieni le gambe fresche.",
+    }
+
+    weeks = []
+    week_number = 1
+    current_date = start_date
+
+    for phase_name, phase_len in phase_alloc:
+        for week_in_phase in range(phase_len):
+            is_recovery = (
+                phase_name not in ("Taper", "Gara") and
+                phase_len >= 3 and
+                week_in_phase == phase_len - 1
+            )
+
+            if phase_name == "Taper":
+                taper_pct = 0.70 - 0.15 * week_in_phase
+                week_km = max_weekly_km * max(0.40, taper_pct)
+            elif phase_name == "Gara":
+                week_km = max_weekly_km * 0.25
+            elif is_recovery:
+                week_km = current_km * 0.70
+            else:
+                week_km = min(current_km, max_weekly_km)
+                current_km *= 1.08  # ~8% progressive overload
+
+            week_km = round(max(10.0, week_km), 1)
+            week_start = current_date
+            week_end = current_date + timedelta(days=6)
+
+            sessions = _tp_build_sessions(week_start, week_km, phase_name, goal_race, paces)
+
+            weeks.append({
+                "athlete_id": athlete_id,
+                "week_number": week_number,
+                "week_start": week_start.isoformat(),
+                "week_end": week_end.isoformat(),
+                "phase": phase_name,
+                "phase_description": phase_descs.get(phase_name, ""),
+                "target_km": week_km,
+                "is_recovery_week": is_recovery,
+                "sessions": sessions,
+            })
+
+            week_number += 1
+            current_date += timedelta(weeks=1)
+
+    return weeks
+
+
+@app.post("/api/training-plan/generate")
+async def generate_training_plan(request: Request):
+    """Generate a personalized training plan based on profile and VDOT."""
+    body = await request.json()
+    goal_race = body.get("goal_race", "Half Marathon")
+    weeks_to_race = int(body.get("weeks_to_race", 16))
+
+    athlete_id = await _get_athlete_id()
+    q = {"athlete_id": athlete_id} if athlete_id else {}
+
+    profile = await db.profile.find_one(q)
+    runs = await db.runs.find(q).sort("date", -1).to_list(500)
+
+    max_hr = int((profile or {}).get("max_hr", 190))
+    defaults_km = {"5K": 40.0, "10K": 50.0, "Half Marathon": 60.0, "Marathon": 70.0}
+    raw_max_km = (profile or {}).get("max_weekly_km")
+    max_weekly_km = float(raw_max_km) if raw_max_km else defaults_km.get(goal_race, 55.0)
+    level = str((profile or {}).get("level", "intermediate"))
+
+    vdot = _calc_vdot(runs, max_hr)
+    paces = _tp_daniels_paces(vdot) if vdot else None
+
+    weeks = _generate_plan_weeks(goal_race, weeks_to_race, max_weekly_km, level, paces, athlete_id)
+
+    await db.training_plan.delete_many(q)
+    if weeks:
+        await db.training_plan.insert_many(weeks)
+
+    return {"ok": True, "weeks_generated": len(weeks)}
+
+
+@app.post("/api/training-plan/adapt")
+async def adapt_training_plan():
+    """Auto-adapt the plan using 5 scientific models.
+
+    Models applied in order:
+    1. ACWR  — Acute:Chronic Workload Ratio (Gabbett 2016)
+    2. TSB   — Fitness-Fatigue form score (Banister 1975)
+    3. VDOT  — Pace drift correction (Daniels)
+    4. COMP  — Compliance / adherence tracking
+    5. TAPER — Race-proximity taper enforcement
+    """
+    from datetime import date, timedelta
+
+    athlete_id = await _get_athlete_id()
+    q = {"athlete_id": athlete_id} if athlete_id else {}
+
+    profile = await db.profile.find_one(q)
+    max_hr = int((profile or {}).get("max_hr", 190))
+
+    recent_runs = await db.runs.find(q).sort("date", -1).to_list(120)
+    all_weeks   = await db.training_plan.find(q).sort("week_number", 1).to_list(100)
+    ff_doc      = await db.fitness_freshness.find_one(q, sort=[("date", -1)])
+
+    if not all_weeks:
+        return JSONResponse({"error": "no_plan"}, status_code=404)
+
+    today_s = date.today().isoformat()
+    upcoming = [w for w in all_weeks if w.get("week_end", "") >= today_s]
+
+    if not upcoming:
+        return {
+            "ok": True, "adaptations": [], "weeks_modified": 0, "sessions_modified": 0,
+            "message": "Nessuna settimana futura. Genera un nuovo piano.",
+        }
+
+    # Deep-copy upcoming sessions for mutation
+    for w in upcoming:
+        w["_modified"] = False
+        w["sessions"] = [dict(s) for s in w.get("sessions", [])]
+
+    adaptations: list = []
+
+    # ── Helper ────────────────────────────────────────────────────────────────
+    def pace_s(p: Optional[str]) -> int:
+        if not p or ":" not in p:
+            return 0
+        parts = p.split(":")
+        try:
+            return int(parts[0]) * 60 + int(parts[1])
+        except ValueError:
+            return 0
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    #  MODEL 1 — ACWR (Acute:Chronic Workload Ratio)
+    # ═══════════════════════════════════════════════════════════════════════════
+    seven_ago   = (date.today() - timedelta(days=7)).isoformat()
+    twentyone_ago = (date.today() - timedelta(days=28)).isoformat()
+
+    acute_km   = sum(r.get("distance_km", 0) for r in recent_runs if r.get("date", "") >= seven_ago)
+    chronic_km = sum(r.get("distance_km", 0) for r in recent_runs if r.get("date", "") >= twentyone_ago)
+    chronic_w  = (chronic_km / 4) if chronic_km > 0 else 1.0
+    acwr       = round(acute_km / chronic_w, 2) if chronic_w > 0 else 1.0
+
+    if acwr > 1.5:
+        nw = upcoming[0]
+        nw["target_km"] = round(nw["target_km"] * 0.80, 1)
+        for s in nw["sessions"]:
+            if s["type"] in ("intervals", "tempo"):
+                s["type"] = "easy"
+                s["title"] = "Corsa Facile (ACWR)"
+                s["description"] = f"Sessione qualità → corsa facile. ACWR = {acwr}: rischio infortuni. Passo {s.get('target_pace', '6:00')}/km."
+            if s["type"] != "rest" and s.get("target_distance_km", 0) > 0:
+                s["target_distance_km"] = round(s["target_distance_km"] * 0.80, 1)
+        nw["_modified"] = True
+        adaptations.append({"model": "ACWR", "model_name": "Carico Acuto/Cronico",
+            "triggered": True, "severity": "critical",
+            "message": f"ACWR = {acwr} — Zona rossa (>1.5). Volume −20 %, sessioni qualità → corsa facile.",
+            "details": {"acwr": acwr, "acute_km": round(acute_km, 1), "chronic_weekly_km": round(chronic_w, 1)}})
+    elif acwr > 1.3:
+        nw = upcoming[0]
+        nw["target_km"] = round(nw["target_km"] * 0.90, 1)
+        for s in nw["sessions"]:
+            if s["type"] != "rest" and s.get("target_distance_km", 0) > 0:
+                s["target_distance_km"] = round(s["target_distance_km"] * 0.90, 1)
+        nw["_modified"] = True
+        adaptations.append({"model": "ACWR", "model_name": "Carico Acuto/Cronico",
+            "triggered": True, "severity": "warning",
+            "message": f"ACWR = {acwr} — Zona gialla (1.3–1.5). Volume prossima settimana −10 %.",
+            "details": {"acwr": acwr, "acute_km": round(acute_km, 1), "chronic_weekly_km": round(chronic_w, 1)}})
+    else:
+        adaptations.append({"model": "ACWR", "model_name": "Carico Acuto/Cronico",
+            "triggered": False, "severity": "info",
+            "message": f"ACWR = {acwr} — Zona ottimale (0.8–1.3). Nessuna modifica necessaria.",
+            "details": {"acwr": acwr, "acute_km": round(acute_km, 1), "chronic_weekly_km": round(chronic_w, 1)}})
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    #  MODEL 2 — TSB / Fitness-Fatigue (Banister)
+    # ═══════════════════════════════════════════════════════════════════════════
+    tsb = float(ff_doc.get("tsb", 0)) if ff_doc else 0.0
+    ctl = float(ff_doc.get("ctl", 0)) if ff_doc else 0.0
+
+    if tsb < -15:
+        # Replace first quality session in upcoming with easy recovery
+        for w in upcoming[:2]:
+            replaced = False
+            for s in w["sessions"]:
+                if s["type"] in ("intervals", "tempo") and not s.get("completed"):
+                    s["type"] = "easy"
+                    s["title"] = "Recupero Attivo (TSB)"
+                    s["description"] = f"Fatica accumulata elevata (TSB={tsb:.1f}). Sostituita con corsa leggera a passo {s.get('target_pace','6:00')}/km."
+                    w["_modified"] = True
+                    replaced = True
+                    break
+            if replaced:
+                break
+        adaptations.append({"model": "TSB", "model_name": "Forma/Fatica (Banister)",
+            "triggered": True, "severity": "critical",
+            "message": f"TSB = {tsb:.1f} (alta fatica, <−15). Prima sessione qualità → recupero attivo.",
+            "details": {"tsb": round(tsb, 1), "ctl": round(ctl, 1)}})
+    elif tsb < -10:
+        for s in upcoming[0]["sessions"]:
+            if s["type"] in ("intervals", "tempo") and not s.get("completed") and s.get("target_distance_km", 0) > 0:
+                s["target_distance_km"] = round(s["target_distance_km"] * 0.80, 1)
+                upcoming[0]["_modified"] = True
+        adaptations.append({"model": "TSB", "model_name": "Forma/Fatica (Banister)",
+            "triggered": True, "severity": "warning",
+            "message": f"TSB = {tsb:.1f} (fatica moderata, −15/−10). Sessione qualità −20 %.",
+            "details": {"tsb": round(tsb, 1), "ctl": round(ctl, 1)}})
+    else:
+        adaptations.append({"model": "TSB", "model_name": "Forma/Fatica (Banister)",
+            "triggered": False, "severity": "info",
+            "message": f"TSB = {tsb:.1f} — Forma ottimale (>−10). Sessioni qualità confermate.",
+            "details": {"tsb": round(tsb, 1), "ctl": round(ctl, 1)}})
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    #  MODEL 3 — VDOT Drift (Daniels pace correction)
+    # ═══════════════════════════════════════════════════════════════════════════
+    vdot_all = _calc_vdot(recent_runs, max_hr)
+    if vdot_all:
+        ideal = _tp_daniels_paces(vdot_all)
+        ideal_easy_s = pace_s(ideal.get("easy"))
+
+        # Find the easy pace currently stored in the plan's first upcoming week
+        plan_easy_s = 0
+        for s in upcoming[0]["sessions"]:
+            if s["type"] == "easy" and s.get("target_pace"):
+                plan_easy_s = pace_s(s["target_pace"])
+                break
+
+        if plan_easy_s > 0 and ideal_easy_s > 0 and abs(plan_easy_s - ideal_easy_s) >= 10:
+            pace_map = {"easy": ideal.get("easy"), "long": ideal.get("easy"),
+                        "tempo": ideal.get("threshold"), "intervals": ideal.get("interval")}
+            upd = 0
+            for w in upcoming:
+                for s in w["sessions"]:
+                    np = pace_map.get(s["type"])
+                    if np and s["type"] != "rest" and not s.get("completed"):
+                        s["target_pace"] = np
+                        w["_modified"] = True
+                        upd += 1
+            direction = "migliorata" if plan_easy_s > ideal_easy_s else "diminuita"
+            sev = "info" if direction == "migliorata" else "warning"
+            old_p = next((s["target_pace"] for w in all_weeks[:1] for s in w.get("sessions",[]) if s.get("type")=="easy" and s.get("target_pace")), "?")
+            adaptations.append({"model": "VDOT", "model_name": "Drift VDOT (Daniels)",
+                "triggered": True, "severity": sev,
+                "message": f"Fitness {direction}: passo facile {old_p} → {ideal['easy']}/km (VDOT={vdot_all}). Aggiornate {upd} sessioni.",
+                "details": {"vdot": vdot_all, "sessions_updated": upd, "new_easy_pace": ideal.get("easy")}})
+        else:
+            adaptations.append({"model": "VDOT", "model_name": "Drift VDOT (Daniels)",
+                "triggered": False, "severity": "info",
+                "message": f"VDOT = {vdot_all}. Passi di allenamento allineati. Nessuna modifica.",
+                "details": {"vdot": vdot_all}})
+    else:
+        adaptations.append({"model": "VDOT", "model_name": "Drift VDOT (Daniels)",
+            "triggered": False, "severity": "info",
+            "message": "VDOT non calcolabile (nessuna corsa valida nelle ultime settimane).",
+            "details": {}})
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    #  MODEL 4 — Compliance (adherence)
+    # ═══════════════════════════════════════════════════════════════════════════
+    two_weeks_ago = (date.today() - timedelta(days=14)).isoformat()
+    past_sessions = [
+        s for w in all_weeks
+        for s in w.get("sessions", [])
+        if two_weeks_ago <= w.get("week_start", "") <= today_s
+        and s.get("type") != "rest"
+    ]
+    if past_sessions:
+        done  = sum(1 for s in past_sessions if s.get("completed"))
+        comp  = round(done / len(past_sessions) * 100)
+        if comp < 50:
+            for w in upcoming[:2]:
+                w["target_km"] = round(w["target_km"] * 0.85, 1)
+                for s in w["sessions"]:
+                    if s["type"] in ("intervals", "tempo") and not s.get("completed"):
+                        s["type"] = "easy"
+                        s["title"] = f"{s['title']} → Facile"
+                        s["description"] = f"[Compliance {comp}%] " + s["description"]
+                w["_modified"] = True
+            adaptations.append({"model": "COMPLIANCE", "model_name": "Compliance Piano",
+                "triggered": True, "severity": "warning",
+                "message": f"Compliance {comp}% (ultimi 14 gg). Volume −15 %, qualità semplificate nelle prossime 2 settimane.",
+                "details": {"compliance_pct": comp, "completed": done, "planned": len(past_sessions)}})
+        else:
+            adaptations.append({"model": "COMPLIANCE", "model_name": "Compliance Piano",
+                "triggered": False, "severity": "info",
+                "message": f"Compliance {comp}% — {'ottima, progressione confermata.' if comp >= 80 else 'buona, mantenimento.'}",
+                "details": {"compliance_pct": comp, "completed": done, "planned": len(past_sessions)}})
+    else:
+        adaptations.append({"model": "COMPLIANCE", "model_name": "Compliance Piano",
+            "triggered": False, "severity": "info",
+            "message": "Nessuna sessione passata trovata (piano appena generato).",
+            "details": {}})
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    #  MODEL 5 — Race-Proximity Taper enforcement
+    # ═══════════════════════════════════════════════════════════════════════════
+    race_weeks = [w for w in all_weeks if w.get("phase") == "Gara"]
+    max_km_plan = max((w.get("target_km", 0) for w in all_weeks), default=0)
+
+    if race_weeks:
+        race_start_s = race_weeks[0].get("week_start", "")
+        try:
+            days_to_race = (date.fromisoformat(race_start_s) - date.today()).days
+        except ValueError:
+            days_to_race = None
+
+        if days_to_race is not None and 0 < days_to_race <= 14:
+            taper_pct = 0.65 if days_to_race > 7 else 0.40
+            target_km = round(max_km_plan * taper_pct, 1)
+            for w in upcoming:
+                if w.get("week_start", "") < race_start_s and w.get("target_km", 0) > target_km:
+                    scale = target_km / max(w["target_km"], 1)
+                    for s in w["sessions"]:
+                        if s["type"] != "rest" and s.get("target_distance_km", 0) > 0:
+                            s["target_distance_km"] = round(s["target_distance_km"] * scale, 1)
+                    w["target_km"] = target_km
+                    w["_modified"] = True
+            adaptations.append({"model": "TAPER", "model_name": "Prossimità Gara (Taper)",
+                "triggered": True, "severity": "info",
+                "message": f"Gara tra {days_to_race} giorni. Taper attivato: volume → {int(taper_pct*100)}% del massimo ({target_km} km/sett).",
+                "details": {"days_to_race": days_to_race, "taper_km": target_km}})
+        elif days_to_race is not None and days_to_race <= 0:
+            adaptations.append({"model": "TAPER", "model_name": "Prossimità Gara (Taper)",
+                "triggered": True, "severity": "warning",
+                "message": "La settimana gara è già passata. Genera un nuovo piano per il prossimo obiettivo.",
+                "details": {"days_to_race": days_to_race}})
+        else:
+            adaptations.append({"model": "TAPER", "model_name": "Prossimità Gara (Taper)",
+                "triggered": False, "severity": "info",
+                "message": f"Gara tra {days_to_race} giorni — taper non ancora necessario.",
+                "details": {"days_to_race": days_to_race}})
+    else:
+        adaptations.append({"model": "TAPER", "model_name": "Prossimità Gara (Taper)",
+            "triggered": False, "severity": "info",
+            "message": "Nessuna settimana gara trovata nel piano.",
+            "details": {}})
+
+    # ── Persist modified weeks ────────────────────────────────────────────────
+    weeks_mod = 0
+    sessions_mod = 0
+    for w in upcoming:
+        if w.get("_modified"):
+            await db.training_plan.update_one(
+                {"athlete_id": athlete_id, "week_number": w["week_number"]},
+                {"$set": {"sessions": w["sessions"], "target_km": w["target_km"]}},
+            )
+            weeks_mod += 1
+            sessions_mod += sum(1 for s in w["sessions"] if s.get("type") != "rest")
+
+    triggered_count = sum(1 for a in adaptations if a.get("triggered"))
+    return {
+        "ok": True,
+        "adaptations": adaptations,
+        "weeks_modified": weeks_mod,
+        "sessions_modified": sessions_mod,
+        "triggered_count": triggered_count,
+    }
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

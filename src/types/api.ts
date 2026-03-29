@@ -247,6 +247,26 @@ export interface AnalyticsResponse {
   goal_gap: GoalGap | null;
 }
 
+// ─── TRAINING PLAN ADAPT ─────────────────────────────────────────────────────
+
+export interface AdaptAdaptation {
+  model: string;
+  model_name: string;
+  triggered: boolean;
+  severity: 'info' | 'warning' | 'critical';
+  message: string;
+  details: Record<string, unknown>;
+}
+
+export interface AdaptResponse {
+  ok: boolean;
+  adaptations: AdaptAdaptation[];
+  weeks_modified: number;
+  sessions_modified: number;
+  triggered_count: number;
+  message?: string;
+}
+
 // ─── VDOT PACES ──────────────────────────────────────────────────────────────
 
 export interface VdotPacesResponse {
