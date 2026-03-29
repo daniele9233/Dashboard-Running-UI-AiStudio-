@@ -1614,47 +1614,73 @@ async def recalculate_fitness_freshness():
 #  ANALYTICS
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _calc_vdot(runs: list, max_hr: int = 190) -> Optional[float]:
+def _calc_vdot(runs: list, max_hr: int = 190, weeks_window: int = 8) -> Optional[float]:
     """Estimate VDOT from best validated run using Daniels' formula (Jack Daniels 2003).
 
-    Validation rules (per README spec):
+    Uses a recency-weighted window to reflect current fitness, not historical peaks.
+
+    Strategy (3 passes — always returns the most recent valid signal):
+    1. Last `weeks_window` weeks (default 8): captures current form post-injury/break
+    2. Last 16 weeks fallback: if no valid runs in window
+    3. All-time fallback: last resort only
+
+    Validation rules:
     - Distance 4–21 km
     - Pace 2:30–9:00/km (150–540 sec/km)
     - HR >= 85% of max_hr (if available)
+    - Duration >= 5 min
     - Cap VDOT at 55 (amateur runner)
-    Returns the highest valid VDOT found across all runs.
     """
-    best_vdot = None
-    for r in runs:
-        dist = r.get("distance_km", 0)
-        if dist < 4 or dist > 21:
-            continue
-        pace_str = r.get("avg_pace", "")
-        if not pace_str or ":" not in pace_str:
-            continue
-        try:
-            parts = pace_str.split(":")
-            pace_s = int(parts[0]) * 60 + int(parts[1])
-        except (ValueError, IndexError):
-            continue
-        if pace_s < 150 or pace_s > 540:
-            continue
-        duration_min = r.get("duration_minutes", 0) or 0
-        if duration_min < 5:
-            continue
-        avg_hr = r.get("avg_hr")
-        if avg_hr and avg_hr < 0.85 * max_hr:
-            continue
-        speed_mpm = 60000 / pace_s  # m/min — Daniels formula requires m/min
-        vo2 = -4.60 + 0.182258 * speed_mpm + 0.000104 * speed_mpm ** 2
-        pct_max = 0.8 + 0.1894393 * math.exp(-0.012778 * duration_min) + 0.2989558 * math.exp(-0.1932605 * duration_min)
-        if pct_max > 0:
-            vdot = vo2 / pct_max
-            if best_vdot is None or vdot > best_vdot:
-                best_vdot = vdot
-    if best_vdot:
-        return round(min(best_vdot, 55.0), 1)
-    return None
+    import datetime as _dt
+
+    def _best_from(run_list: list) -> Optional[float]:
+        best = None
+        for r in run_list:
+            dist = r.get("distance_km", 0)
+            if dist < 4 or dist > 21:
+                continue
+            pace_str = r.get("avg_pace", "")
+            if not pace_str or ":" not in pace_str:
+                continue
+            try:
+                parts = pace_str.split(":")
+                pace_s = int(parts[0]) * 60 + int(parts[1])
+            except (ValueError, IndexError):
+                continue
+            if pace_s < 150 or pace_s > 540:
+                continue
+            duration_min = r.get("duration_minutes", 0) or 0
+            if duration_min < 5:
+                continue
+            avg_hr = r.get("avg_hr")
+            if avg_hr and avg_hr < 0.85 * max_hr:
+                continue
+            speed_mpm = 60000 / pace_s
+            vo2 = -4.60 + 0.182258 * speed_mpm + 0.000104 * speed_mpm ** 2
+            pct_max = 0.8 + 0.1894393 * math.exp(-0.012778 * duration_min) + 0.2989558 * math.exp(-0.1932605 * duration_min)
+            if pct_max > 0:
+                vdot = vo2 / pct_max
+                if best is None or vdot > best:
+                    best = vdot
+        return round(min(best, 55.0), 1) if best else None
+
+    cutoff_primary = (_dt.date.today() - _dt.timedelta(weeks=weeks_window)).isoformat()
+    cutoff_extended = (_dt.date.today() - _dt.timedelta(weeks=16)).isoformat()
+
+    # Pass 1 — last `weeks_window` weeks (current fitness)
+    recent = [r for r in runs if r.get("date", "") >= cutoff_primary]
+    result = _best_from(recent)
+    if result:
+        return result
+
+    # Pass 2 — last 16 weeks (medium-term)
+    medium = [r for r in runs if r.get("date", "") >= cutoff_extended]
+    result = _best_from(medium)
+    if result:
+        return result
+
+    # Pass 3 — all-time fallback (should rarely trigger)
+    return _best_from(runs)
 
 
 def _vdot_to_race_time(vdot: float, dist_km: float) -> Optional[str]:
