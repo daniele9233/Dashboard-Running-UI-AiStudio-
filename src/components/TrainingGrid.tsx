@@ -187,18 +187,51 @@ function AdaptPlanModal({ onClose, onDone }: { onClose: () => void; onDone: () =
 
 // ─── Generate Plan Modal ─────────────────────────────────────────────────────
 
+interface GenerateResult {
+  current_vdot: number;
+  target_vdot: number;
+  weeks_generated: number;
+  feasibility: {
+    feasible: boolean;
+    difficulty: string;
+    message: string;
+    confidence_pct: number;
+    adjusted_target_vdot?: number;
+    adjusted_time?: string;
+    suggested_weeks?: number;
+  };
+  race_predictions: Record<string, string>;
+}
+
+const TIME_PLACEHOLDERS: Record<string, string> = {
+  "5K": "es. 25:00",
+  "10K": "es. 52:00",
+  "Half Marathon": "es. 1:55:00",
+  "Marathon": "es. 4:10:00",
+};
+
 function GeneratePlanModal({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
-  const [goalRace, setGoalRace] = useState("Half Marathon");
-  const [weeksToRace, setWeeksToRace] = useState(16);
+  const [goalRace, setGoalRace] = useState("5K");
+  const [weeksToRace, setWeeksToRace] = useState(12);
+  const [targetTime, setTargetTime] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [result, setResult] = useState<GenerateResult | null>(null);
 
   const handleGenerate = async () => {
+    if (!targetTime.trim()) {
+      setError("Inserisci il tempo obiettivo (mm:ss o h:mm:ss).");
+      return;
+    }
     setLoading(true);
     setError(null);
     try {
-      await generateTrainingPlan({ goal_race: goalRace, weeks_to_race: weeksToRace });
-      onDone();
+      const res = await generateTrainingPlan({
+        goal_race: goalRace,
+        weeks_to_race: weeksToRace,
+        target_time: targetTime.trim(),
+      } as { goal_race: string; weeks_to_race: number });
+      setResult(res as unknown as GenerateResult);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Errore nella generazione del piano.");
     } finally {
@@ -206,78 +239,184 @@ function GeneratePlanModal({ onClose, onDone }: { onClose: () => void; onDone: (
     }
   };
 
+  const feasColor = result?.feasibility.difficulty === "already_there" ? "text-[#10B981]"
+    : result?.feasibility.difficulty === "realistic" ? "text-[#3B82F6]"
+    : result?.feasibility.difficulty === "challenging" ? "text-amber-400"
+    : "text-red-400";
+
   return (
-    <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
-      <div className="bg-[#1E1E1E] border border-[#2A2A2A] rounded-2xl p-8 w-full max-w-md shadow-2xl">
-        <h2 className="text-xl font-bold text-white mb-1">Genera Piano di Allenamento</h2>
-        <p className="text-gray-500 text-sm mb-6">Piano personalizzato basato sul tuo VDOT e profilo.</p>
+    <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
+      <div className="bg-[#1E1E1E] border border-[#2A2A2A] rounded-2xl w-full max-w-lg shadow-2xl flex flex-col max-h-[90vh]">
 
-        {/* Goal Race */}
-        <div className="mb-6">
-          <label className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3 block">Obiettivo Gara</label>
-          <div className="grid grid-cols-2 gap-2">
-            {(["5K", "10K", "Half Marathon", "Marathon"] as const).map(g => (
-              <button
-                key={g}
-                type="button"
-                onClick={() => setGoalRace(g)}
-                className={`py-3 px-4 rounded-lg text-sm font-medium border transition-colors ${
-                  goalRace === g
-                    ? "bg-[#3B82F6] border-[#3B82F6] text-white"
-                    : "bg-[#121212] border-[#2A2A2A] text-gray-400 hover:border-gray-500"
-                }`}
-              >
-                {g}
-              </button>
-            ))}
-          </div>
+        {/* Header */}
+        <div className="p-6 pb-4 border-b border-[#2A2A2A] shrink-0">
+          <h2 className="text-xl font-bold text-white mb-1">Genera Piano di Allenamento</h2>
+          <p className="text-gray-500 text-sm">Piano scientifico basato su formula Daniels e progressione VDOT.</p>
         </div>
 
-        {/* Weeks to race */}
-        <div className="mb-8">
-          <label className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3 block">
-            Settimane alla gara: <span className="text-white font-bold">{weeksToRace}</span>
-          </label>
-          <input
-            type="range"
-            min={8}
-            max={24}
-            step={1}
-            value={weeksToRace}
-            onChange={e => setWeeksToRace(Number(e.target.value))}
-            className="w-full accent-[#3B82F6]"
-          />
-          <div className="flex justify-between text-xs text-gray-600 mt-1">
-            <span>8 sett.</span>
-            <span>24 sett.</span>
-          </div>
+        {/* Content */}
+        <div className="flex-1 overflow-y-auto p-6">
+          {!result ? (
+            <>
+              {/* Goal Race */}
+              <div className="mb-5">
+                <label className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3 block">Obiettivo Gara</label>
+                <div className="grid grid-cols-4 gap-2">
+                  {(["5K", "10K", "Half Marathon", "Marathon"] as const).map(g => (
+                    <button
+                      key={g}
+                      type="button"
+                      onClick={() => { setGoalRace(g); setTargetTime(""); }}
+                      className={`py-2.5 px-2 rounded-lg text-xs font-medium border transition-colors ${
+                        goalRace === g
+                          ? "bg-[#3B82F6] border-[#3B82F6] text-white"
+                          : "bg-[#121212] border-[#2A2A2A] text-gray-400 hover:border-gray-500"
+                      }`}
+                    >
+                      {g}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Target Time */}
+              <div className="mb-5">
+                <label className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3 block">
+                  Tempo Obiettivo
+                </label>
+                <div className="relative">
+                  <input
+                    type="text"
+                    value={targetTime}
+                    onChange={e => setTargetTime(e.target.value)}
+                    placeholder={TIME_PLACEHOLDERS[goalRace] || "mm:ss"}
+                    className="w-full bg-[#121212] border border-[#2A2A2A] rounded-lg px-4 py-3 text-white text-lg font-mono placeholder:text-gray-600 focus:border-[#3B82F6] focus:outline-none transition-colors"
+                  />
+                  <span className="absolute right-4 top-1/2 -translate-y-1/2 text-xs text-gray-500">
+                    {goalRace === "Marathon" || goalRace === "Half Marathon" ? "h:mm:ss" : "mm:ss"}
+                  </span>
+                </div>
+                <p className="text-xs text-gray-600 mt-1.5">
+                  Il piano calcolerà il VDOT necessario e costruirà una progressione settimanale per raggiungerlo.
+                </p>
+              </div>
+
+              {/* Weeks slider */}
+              <div className="mb-6">
+                <label className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3 block">
+                  Settimane alla gara: <span className="text-white font-bold">{weeksToRace}</span>
+                </label>
+                <input
+                  type="range" min={8} max={24} step={1}
+                  value={weeksToRace}
+                  onChange={e => setWeeksToRace(Number(e.target.value))}
+                  className="w-full accent-[#3B82F6]"
+                />
+                <div className="flex justify-between text-xs text-gray-600 mt-1">
+                  <span>8 sett.</span>
+                  <span>24 sett.</span>
+                </div>
+              </div>
+            </>
+          ) : (
+            /* ── Result view ─────────────────────────────────── */
+            <div className="space-y-4">
+              {/* VDOT Summary */}
+              <div className="grid grid-cols-2 gap-3">
+                <div className="bg-[#121212] border border-[#2A2A2A] rounded-xl p-4 text-center">
+                  <div className="text-xs text-gray-500 uppercase tracking-wider mb-1">VDOT Attuale</div>
+                  <div className="text-3xl font-bold text-white">{result.current_vdot}</div>
+                </div>
+                <div className="bg-[#121212] border border-[#2A2A2A] rounded-xl p-4 text-center">
+                  <div className="text-xs text-gray-500 uppercase tracking-wider mb-1">VDOT Target</div>
+                  <div className="text-3xl font-bold text-[#3B82F6]">{result.target_vdot}</div>
+                </div>
+              </div>
+
+              {/* Gap indicator */}
+              <div className="bg-[#121212] border border-[#2A2A2A] rounded-xl p-4">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-xs font-bold text-gray-400 uppercase">Progressione richiesta</span>
+                  <span className={`text-sm font-bold ${feasColor}`}>
+                    +{Math.max(0, result.target_vdot - result.current_vdot).toFixed(1)} VDOT
+                  </span>
+                </div>
+                <div className="w-full h-2 bg-[#2A2A2A] rounded-full overflow-hidden">
+                  <div
+                    className="h-full rounded-full bg-gradient-to-r from-[#3B82F6] to-[#10B981] transition-all"
+                    style={{ width: `${Math.min(100, result.feasibility.confidence_pct)}%` }}
+                  />
+                </div>
+                <p className={`text-xs mt-2 ${feasColor}`}>
+                  {result.feasibility.message}
+                </p>
+                {result.feasibility.adjusted_time && (
+                  <p className="text-xs text-amber-400 mt-1">
+                    ⚠ Tempo ricalibrato realisticamente: {result.feasibility.adjusted_time}
+                  </p>
+                )}
+              </div>
+
+              {/* Race predictions at target VDOT */}
+              {Object.keys(result.race_predictions).length > 0 && (
+                <div className="bg-[#121212] border border-[#2A2A2A] rounded-xl p-4">
+                  <div className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3">
+                    Previsioni a VDOT {result.target_vdot}
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    {Object.entries(result.race_predictions).map(([dist, time]) => (
+                      <div key={dist} className={`flex justify-between items-center px-3 py-2 rounded-lg ${
+                        dist === goalRace ? 'bg-[#3B82F6]/10 border border-[#3B82F6]/30' : 'bg-[#1E1E1E]'
+                      }`}>
+                        <span className="text-xs text-gray-400">{dist}</span>
+                        <span className={`text-sm font-mono font-bold ${dist === goalRace ? 'text-[#3B82F6]' : 'text-white'}`}>
+                          {time}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Plan summary */}
+              <div className="flex items-center gap-2 text-[#10B981] bg-[#10B981]/10 border border-[#10B981]/20 rounded-lg p-3">
+                <CheckCircle2 className="w-4 h-4 shrink-0" />
+                <span className="text-sm">Piano di {result.weeks_generated} settimane generato con successo!</span>
+              </div>
+            </div>
+          )}
+
+          {error && <p className="text-red-400 text-sm mt-4">{error}</p>}
         </div>
 
-        {error && <p className="text-red-400 text-sm mb-4">{error}</p>}
-
-        <div className="flex gap-3">
+        {/* Footer */}
+        <div className="p-6 border-t border-[#2A2A2A] shrink-0 flex gap-3">
           <button
             type="button"
-            onClick={onClose}
+            onClick={() => { onClose(); if (result) onDone(); }}
             className="flex-1 py-3 rounded-lg bg-[#121212] border border-[#2A2A2A] text-gray-400 hover:text-white transition-colors text-sm font-medium"
           >
-            Annulla
+            {result ? "Chiudi" : "Annulla"}
           </button>
-          <button
-            type="button"
-            onClick={handleGenerate}
-            disabled={loading}
-            className="flex-1 py-3 rounded-lg bg-[#3B82F6] hover:bg-[#2563EB] text-white text-sm font-medium transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
-          >
-            {loading ? (
-              <span>Generando…</span>
-            ) : (
-              <>
-                <Sparkles className="w-4 h-4" />
-                Genera Piano
-              </>
-            )}
-          </button>
+          {!result && (
+            <button
+              type="button"
+              onClick={handleGenerate}
+              disabled={loading}
+              className="flex-1 py-3 rounded-lg bg-[#3B82F6] hover:bg-[#2563EB] text-white text-sm font-medium transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
+            >
+              {loading ? <span>Generando…</span> : <><Sparkles className="w-4 h-4" /> Genera Piano</>}
+            </button>
+          )}
+          {result && (
+            <button
+              type="button"
+              onClick={() => { onClose(); onDone(); }}
+              className="flex-1 py-3 rounded-lg bg-[#3B82F6] hover:bg-[#2563EB] text-white text-sm font-medium transition-colors flex items-center justify-center gap-2"
+            >
+              Vedi Piano
+            </button>
+          )}
         </div>
       </div>
     </div>
@@ -567,11 +706,27 @@ export function TrainingGrid() {
       <div className="flex items-center justify-between p-6 border-b border-[#2A2A2A]">
         <div className="flex items-center gap-3">
           <h1 className="text-2xl font-bold text-white">Training Menu</h1>
-          {hasPlan && (
-            <span className="text-xs text-gray-500 bg-[#1E1E1E] border border-[#2A2A2A] px-3 py-1 rounded-full">
-              {planData!.weeks.length} settimane · {planData!.weeks[0]?.phase}
-            </span>
-          )}
+          {hasPlan && (() => {
+            const firstW = planData!.weeks[0];
+            const lastW = planData!.weeks[planData!.weeks.length - 1];
+            return (
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-gray-500 bg-[#1E1E1E] border border-[#2A2A2A] px-3 py-1 rounded-full">
+                  {planData!.weeks.length} sett. · {firstW?.phase}
+                </span>
+                {firstW?.target_vdot && lastW?.target_vdot && (
+                  <span className="text-xs text-[#3B82F6] bg-[#3B82F6]/10 border border-[#3B82F6]/20 px-3 py-1 rounded-full font-mono">
+                    VDOT {firstW.target_vdot} → {lastW.target_vdot}
+                  </span>
+                )}
+                {firstW?.goal_race && firstW?.target_time && (
+                  <span className="text-xs text-[#10B981] bg-[#10B981]/10 border border-[#10B981]/20 px-3 py-1 rounded-full">
+                    🎯 {firstW.goal_race} in {firstW.target_time}
+                  </span>
+                )}
+              </div>
+            );
+          })()}
         </div>
 
         <div className="flex items-center gap-4">

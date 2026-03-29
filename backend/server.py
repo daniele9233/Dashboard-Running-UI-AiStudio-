@@ -476,7 +476,16 @@ async def strava_sync():
         resting_hr_p = int(profile_doc.get("resting_hr", 50)) if profile_doc else 50
         await _compute_fitness_freshness(athlete_id, max_hr_p, resting_hr_p)
 
-    return {"ok": True, "synced": synced}
+    # ── Auto-adapt training plan on every sync ───────────────────────────────
+    # Recalculate VDOT from latest runs and update future weeks if paces drifted
+    adapt_result = None
+    if athlete_id and synced > 0:
+        try:
+            adapt_result = await _auto_adapt_on_sync(athlete_id)
+        except Exception:
+            pass  # never fail the sync because of adapt
+
+    return {"ok": True, "synced": synced, "auto_adapt": adapt_result}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -666,9 +675,16 @@ async def toggle_session_complete(request: Request):
 
 
 # ─── Training Plan — generation helpers ──────────────────────────────────────
+# All formulas from Jack Daniels' "Running Formula" 3rd ed. (2013)
+# VO2 = -4.60 + 0.182258·v + 0.000104·v²   (v in m/min)
+# %max = 0.8 + 0.1894393·e^(−0.012778·t) + 0.2989558·e^(−0.1932605·t)  (t in min)
+# VDOT = VO2 / %max
+# ─────────────────────────────────────────────────────────────────────────────
+
+RACE_DISTANCES = {"5K": 5.0, "10K": 10.0, "Half Marathon": 21.0975, "Marathon": 42.195}
 
 def _tp_daniels_paces(vdot: float) -> dict:
-    """Compute Daniels training paces from VDOT."""
+    """Compute Daniels 5-zone training paces from VDOT."""
     def pace_at_pct(pct: float) -> Optional[str]:
         vo2 = vdot * pct
         disc = 0.182258 ** 2 + 4 * 0.000104 * (vo2 + 4.60)
@@ -685,81 +701,215 @@ def _tp_daniels_paces(vdot: float) -> dict:
     }
 
 
+def _time_to_vdot(dist_km: float, time_minutes: float) -> Optional[float]:
+    """Inverse Daniels: given a race distance + finish time → VDOT.
+
+    Uses the same iterative Newton approach as _vdot_to_race_time but in reverse:
+    for a known time t and distance d, compute VO2 from speed, then VDOT = VO2 / %max.
+    """
+    if dist_km <= 0 or time_minutes <= 0:
+        return None
+    v = (dist_km * 1000) / time_minutes  # m/min
+    vo2 = -4.60 + 0.182258 * v + 0.000104 * v ** 2
+    pct = 0.8 + 0.1894393 * math.exp(-0.012778 * time_minutes) + 0.2989558 * math.exp(-0.1932605 * time_minutes)
+    if pct <= 0:
+        return None
+    return round(vo2 / pct, 2)
+
+
+def _parse_time_str(ts: str) -> Optional[float]:
+    """Parse 'mm:ss' or 'h:mm:ss' into total minutes."""
+    if not ts:
+        return None
+    parts = ts.strip().split(":")
+    try:
+        if len(parts) == 2:
+            return int(parts[0]) + int(parts[1]) / 60.0
+        elif len(parts) == 3:
+            return int(parts[0]) * 60 + int(parts[1]) + int(parts[2]) / 60.0
+    except (ValueError, IndexError):
+        return None
+    return None
+
+
+def _assess_feasibility(current_vdot: float, target_vdot: float, weeks: int) -> dict:
+    """Assess if the VDOT gap is achievable in the given weeks.
+
+    Research basis (Daniels 2013, Pfitzinger 2015):
+    - Well-trained amateur: ~0.3–0.8 VDOT / mesocycle (3–4 weeks)
+    - Beginner with room to grow: up to 1.0 VDOT / mesocycle
+    - Diminishing returns above VDOT ~50
+    - Realistic maximum: ~0.25 VDOT / week sustained over 12–24 weeks
+    """
+    gap = target_vdot - current_vdot
+    mesocycles = weeks / 3.5  # average mesocycle length
+
+    # Conservative estimate: 0.5 VDOT per mesocycle average
+    max_gain_conservative = mesocycles * 0.5
+    # Optimistic: 0.8 per mesocycle
+    max_gain_optimistic = mesocycles * 0.8
+
+    if gap <= 0:
+        return {"feasible": True, "difficulty": "already_there",
+                "message": f"Il tuo VDOT attuale ({current_vdot}) è già sufficiente per l'obiettivo ({target_vdot}). Piano di mantenimento.",
+                "confidence_pct": 95}
+    elif gap <= max_gain_conservative:
+        return {"feasible": True, "difficulty": "realistic",
+                "message": f"Obiettivo realistico: +{gap:.1f} VDOT in {weeks} settimane ({gap/mesocycles:.1f}/mesociclo). Progressione standard Daniels.",
+                "confidence_pct": 80}
+    elif gap <= max_gain_optimistic:
+        return {"feasible": True, "difficulty": "challenging",
+                "message": f"Obiettivo ambizioso: +{gap:.1f} VDOT in {weeks} settimane ({gap/mesocycles:.1f}/mesociclo). Richiede costanza totale.",
+                "confidence_pct": 55}
+    else:
+        suggested_weeks = int(math.ceil(gap / 0.5 * 3.5))
+        return {"feasible": False, "difficulty": "unrealistic",
+                "message": f"Gap troppo alto: +{gap:.1f} VDOT in {weeks} sett. Servirebbero ~{suggested_weeks} settimane. Obiettivo ricalibrato.",
+                "confidence_pct": 20, "suggested_weeks": suggested_weeks}
+
+
+def _build_vdot_progression(current: float, target: float, weeks_total: int,
+                             phase_alloc: list) -> list[float]:
+    """Build per-week VDOT targets with periodized progression.
+
+    Daniels principle: VDOT improvements are NOT linear.
+    - Base: slow gains (+0.05/week)    — aerobic foundation
+    - Sviluppo: moderate (+0.15/week)  — threshold work kicks in
+    - Intensità: fastest (+0.25/week)  — VO2max stimulus
+    - Specifico: moderate (+0.15/week) — race-specific consolidation
+    - Taper: maintain (0)              — supercompensation
+    - Gara: maintain (0)               — peak
+    """
+    gap = target - current
+    if gap <= 0:
+        return [current] * weeks_total
+
+    # Phase gain rates (relative weight of VDOT gain per week)
+    phase_rates = {
+        "Base Aerobica": 0.10,
+        "Sviluppo":      0.20,
+        "Intensità":     0.35,
+        "Specifico":     0.20,
+        "Taper":         0.00,
+        "Gara":          0.00,
+    }
+
+    # Calculate total weighted weeks to distribute the gap
+    total_weight = sum(phase_rates.get(name, 0) * n for name, n in phase_alloc)
+    if total_weight <= 0:
+        return [current] * weeks_total
+
+    progression = []
+    running_vdot = current
+    for phase_name, phase_len in phase_alloc:
+        rate = phase_rates.get(phase_name, 0)
+        for _ in range(phase_len):
+            if total_weight > 0 and rate > 0:
+                week_gain = (gap * rate) / total_weight
+                running_vdot += week_gain
+            # Cap at target
+            running_vdot = min(running_vdot, target)
+            progression.append(round(running_vdot, 2))
+
+    return progression
+
+
 def _tp_quality_session(phase: str, goal: str, dist_km: float,
-                         paces: Optional[dict]) -> tuple:
-    """Return (type, title, description, pace) for the weekly quality session."""
-    p = paces or {}
-    ep = p.get("easy") or "6:00"
-    mp = p.get("marathon") or "5:20"
-    tp = p.get("threshold") or "5:00"
-    ip = p.get("interval") or "4:30"
-    rp = p.get("repetition") or "4:10"
+                         paces: dict, week_vdot: float) -> tuple:
+    """Return (type, title, description, pace) for the weekly quality session.
+
+    Sessions are designed per Daniels' phase philosophy:
+    - Base: only easy running, build aerobic enzymes + capillaries
+    - Sviluppo: tempo/threshold work, raise lactate turnpoint
+    - Intensità: VO2max intervals, raise aerobic ceiling
+    - Specifico: race-pace practice, neuromuscular + psychological
+    - Taper/Gara: reduced volume, maintain sharpness
+    """
+    ep = paces.get("easy") or "6:00"
+    mp = paces.get("marathon") or "5:20"
+    tp = paces.get("threshold") or "5:00"
+    ip = paces.get("interval") or "4:30"
+    rp = paces.get("repetition") or "4:10"
+    race_pace = _vdot_to_race_time(week_vdot, RACE_DISTANCES.get(goal, 5.0))
 
     if phase == "Base Aerobica":
-        return ("easy", "Corsa Aerobica",
-                f"Corsa facile a ritmo di conversazione. Passo {ep}/km, sforzo 4–5/10.", ep)
+        return ("easy", "Corsa Aerobica Progressiva",
+                f"Corsa a ritmo conversazionale con ultimi 2 km leggermente più veloci. "
+                f"Passo {ep}/km → chiudi a passo {mp}/km. Sforzo 4–5/10. "
+                f"Obiettivo: costruire base mitocondriale e capillare.", ep)
 
     if phase == "Sviluppo":
-        if goal == "Marathon":
-            return ("tempo", "Progressivo Maratona",
-                    f"15 min riscaldamento · 25 min @ {mp}/km (passo maratona) · 10 min defaticamento.", mp)
-        return ("tempo", "Corsa a Soglia",
-                f"15 min riscaldamento · 20–25 min continui @ {tp}/km · 10 min defaticamento.", tp)
+        if goal in ("Marathon", "Half Marathon"):
+            return ("tempo", "Corsa a Soglia Continua",
+                    f"15 min warm-up @ {ep}/km · 25 min continui @ {tp}/km (soglia lattacida ~88% VO₂max) · "
+                    f"10 min defaticamento. VDOT settimana: {week_vdot}.", tp)
+        return ("tempo", "Tempo Run",
+                f"2 km warm-up · 20 min continui @ {tp}/km (soglia ~88% VO₂max) · "
+                f"2 km defaticamento. VDOT settimana: {week_vdot}.", tp)
 
     if phase == "Intensità":
         if goal == "5K":
-            return ("intervals", "Intervalli 400 m",
-                    f"2 km riscaldamento · 12×400 m @ {rp}/km con 90 s recupero · 2 km defaticamento.", rp)
+            return ("intervals", "VO₂max 400 m",
+                    f"2 km warm-up · 12×400 m @ {ip}/km (95–100% VO₂max) con 90 s jog recupero · "
+                    f"2 km defaticamento. VDOT target: {week_vdot}.", ip)
         if goal == "10K":
-            return ("intervals", "Intervalli 800 m",
-                    f"2 km riscaldamento · 6×800 m @ {ip}/km con 90 s recupero · 2 km defaticamento.", ip)
+            return ("intervals", "VO₂max 800 m",
+                    f"2 km warm-up · 6×800 m @ {ip}/km (95–100% VO₂max) con 2 min jog · "
+                    f"2 km defaticamento. VDOT target: {week_vdot}.", ip)
         if goal == "Half Marathon":
-            return ("intervals", "Intervalli 1000 m",
-                    f"2 km riscaldamento · 5×1000 m @ {ip}/km con 2 min recupero · 2 km defaticamento.", ip)
-        return ("intervals", "Cruise Intervals",
-                f"2 km riscaldamento · 3×3 km @ {tp}/km con 1 min recupero · 2 km defaticamento.", tp)
+            return ("intervals", "Cruise Intervals",
+                    f"2 km warm-up · 4×1600 m @ {tp}/km (~88% VO₂max) con 60 s recupero · "
+                    f"2 km defaticamento. VDOT target: {week_vdot}.", tp)
+        return ("intervals", "Marathon VO₂max",
+                f"2 km warm-up · 5×1000 m @ {ip}/km con 3 min jog · "
+                f"2 km defaticamento. VDOT target: {week_vdot}.", ip)
 
     if phase == "Specifico":
+        rp_str = race_pace or tp
         if goal == "5K":
-            return ("intervals", "Gare di Allenamento",
-                    f"2 km riscaldamento · 4×1200 m @ {ip}/km con 3 min recupero · 2 km defaticamento.", ip)
+            return ("intervals", "Race Pace 5K",
+                    f"2 km warm-up · 3×1600 m a ritmo gara 5K (target {rp_str}) con 2 min recupero · "
+                    f"2 km defaticamento. Simulazione dello sforzo gara.", ip)
         if goal == "10K":
-            return ("intervals", "Specifici 10K",
-                    f"2 km riscaldamento · 8×1 km @ {ip}/km con 90 s recupero · 2 km defaticamento.", ip)
+            return ("intervals", "Race Pace 10K",
+                    f"2 km warm-up · 4×2000 m a ritmo gara 10K (target {rp_str}) con 90 s recupero · "
+                    f"2 km defaticamento. Abituarsi al ritmo gara.", ip)
         if goal == "Half Marathon":
-            cont = round(dist_km * 0.55, 1)
-            return ("tempo", "Ritmo Gara HM",
-                    f"2 km riscaldamento · {cont} km continui @ {tp}/km · 2 km defaticamento.", tp)
-        mp_km = round(dist_km * 0.65, 1)
-        return ("tempo", "Passo Maratona",
-                f"2 km riscaldamento · {mp_km} km @ {mp}/km · 2 km defaticamento.", mp)
+            km_spec = round(min(dist_km, 14), 1)
+            return ("tempo", "Race Pace HM",
+                    f"2 km warm-up · {km_spec} km continui @ {tp}/km (ritmo gara HM, target {rp_str}) · "
+                    f"2 km defaticamento.", tp)
+        mp_km = round(min(dist_km, 25), 1)
+        return ("tempo", "Simulazione Maratona",
+                f"2 km warm-up · {mp_km} km @ {mp}/km (passo maratona, target {rp_str}) · "
+                f"2 km defaticamento.", mp)
 
     if phase == "Taper":
         return ("easy", "Easy + Strides",
-                f"Corsa facile {round(dist_km, 1)} km @ {ep}/km con 4×100 m progressivi alla fine.", ep)
+                f"Corsa facile {round(dist_km, 1)} km @ {ep}/km con 4×100 m progressivi finale. "
+                f"Mantieni le gambe reattive, VDOT = {week_vdot}.", ep)
 
-    # Gara week
-    return ("easy", "Corsa Sciolta",
-            f"Corsa leggera di attivazione {round(dist_km, 1)} km a passo {ep}/km.", ep)
+    # Gara
+    return ("easy", "Attivazione Pre-Gara",
+            f"Corsa leggera {round(dist_km, 1)} km @ {ep}/km. Gambe fresche per la gara.", ep)
 
 
 def _tp_build_sessions(week_start, week_km: float, phase: str, goal: str,
-                       paces: Optional[dict]) -> list:
-    """Build sessions list for a training week."""
+                       paces: dict, week_vdot: float) -> list:
+    """Build 7-day session list for a training week."""
     from datetime import timedelta
     day_names = ["Lun", "Mar", "Mer", "Gio", "Ven", "Sab", "Dom"]
-    p = paces or {}
-    ep = p.get("easy") or "6:00"
+    ep = paces.get("easy") or "6:00"
 
-    # Km distribution per day (Mon=0…Sun=6)
+    # Day layout depends on goal distance (more sessions for longer races)
     if goal == "5K":
         dist_map = {0: 0.20, 1: 0.25, 3: 0.20, 5: 0.35}
     elif goal == "10K":
-        dist_map = {0: 0.20, 1: 0.22, 2: 0.15, 3: 0.18, 5: 0.25}
+        dist_map = {0: 0.20, 1: 0.22, 2: 0.13, 3: 0.18, 5: 0.27}
     elif goal == "Half Marathon":
-        dist_map = {0: 0.20, 1: 0.18, 2: 0.15, 3: 0.17, 5: 0.30}
+        dist_map = {0: 0.18, 1: 0.18, 2: 0.12, 3: 0.17, 5: 0.35}
     else:  # Marathon
-        dist_map = {0: 0.18, 1: 0.15, 2: 0.15, 3: 0.15, 4: 0.12, 5: 0.25}
+        dist_map = {0: 0.16, 1: 0.14, 2: 0.12, 3: 0.14, 4: 0.10, 5: 0.34}
 
     sessions = []
     for day_offset in range(7):
@@ -771,7 +921,7 @@ def _tp_build_sessions(week_start, week_km: float, phase: str, goal: str,
                 "date": session_date.isoformat(),
                 "type": "rest",
                 "title": "Riposo",
-                "description": "Giorno di riposo. Recupero attivo: stretching o camminata leggera.",
+                "description": "Giorno di riposo. Recupero attivo: stretching, foam rolling o camminata.",
                 "target_distance_km": 0,
                 "target_pace": None,
                 "target_duration_min": None,
@@ -783,13 +933,15 @@ def _tp_build_sessions(week_start, week_km: float, phase: str, goal: str,
         dist_km = round(week_km * dist_map[day_offset], 1)
 
         if day_offset == 1:  # Tuesday = quality session
-            s_type, title, desc, pace = _tp_quality_session(phase, goal, dist_km, paces)
+            s_type, title, desc, pace = _tp_quality_session(phase, goal, dist_km, paces, week_vdot)
         elif day_offset == 5:  # Saturday = long run
             s_type, title, pace = "long", "Corsa Lunga", ep
-            desc = f"Corsa lunga {dist_km} km a passo {ep}/km. Mantieni conversazione, idratati bene."
+            desc = (f"Corsa lunga {dist_km} km a passo {ep}/km. Sforzo 5–6/10. "
+                    f"Costruisci resistenza aerobica e fibre lente (tipo I). Idratazione costante.")
         else:
             s_type, title, pace = "easy", "Corsa Facile", ep
-            desc = f"Corsa facile {dist_km} km a passo {ep}/km. Sforzo percepito 4–5/10."
+            desc = (f"Corsa facile {dist_km} km a passo {ep}/km. "
+                    f"Sforzo percepito 3–4/10. Frequenza cardiaca Z1–Z2.")
 
         try:
             pp = pace.split(":")
@@ -814,29 +966,30 @@ def _tp_build_sessions(week_start, week_km: float, phase: str, goal: str,
 
 
 def _generate_plan_weeks(goal_race: str, weeks_total: int, max_weekly_km: float,
-                          level: str, paces: Optional[dict], athlete_id) -> list:
-    """Generate periodized training plan and return list of week documents."""
+                          current_vdot: float, target_vdot: float,
+                          athlete_id, target_time_str: str) -> list:
+    """Generate goal-driven periodized plan with weekly VDOT progression."""
     from datetime import date, timedelta
 
     weeks_total = max(8, min(int(weeks_total), 32))
 
+    # ── Periodization: phase allocation (Daniels 4-phase model adapted) ──────
     if weeks_total <= 10:
         raw_phases = [
-            ("Base Aerobica", 0.40), ("Intensità", 0.35),
-            ("Taper", 0.15), ("Gara", 0.10),
+            ("Base Aerobica", 0.30), ("Intensità", 0.40),
+            ("Taper", 0.20), ("Gara", 0.10),
         ]
     elif weeks_total <= 16:
         raw_phases = [
-            ("Base Aerobica", 0.30), ("Sviluppo", 0.20), ("Intensità", 0.25),
-            ("Taper", 0.15), ("Gara", 0.10),
+            ("Base Aerobica", 0.25), ("Sviluppo", 0.20), ("Intensità", 0.25),
+            ("Specifico", 0.10), ("Taper", 0.12), ("Gara", 0.08),
         ]
     else:
         raw_phases = [
-            ("Base Aerobica", 0.25), ("Sviluppo", 0.20), ("Intensità", 0.20),
-            ("Specifico", 0.15), ("Taper", 0.12), ("Gara", 0.08),
+            ("Base Aerobica", 0.22), ("Sviluppo", 0.18), ("Intensità", 0.22),
+            ("Specifico", 0.18), ("Taper", 0.12), ("Gara", 0.08),
         ]
 
-    # Integer week allocation (always sums to weeks_total)
     phase_alloc = []
     remaining = weeks_total
     for i, (name, frac) in enumerate(raw_phases):
@@ -844,51 +997,62 @@ def _generate_plan_weeks(goal_race: str, weeks_total: int, max_weekly_km: float,
         remaining -= n
         phase_alloc.append((name, n))
 
-    # Start from the next Monday
+    # ── VDOT progression per week ────────────────────────────────────────────
+    vdot_progression = _build_vdot_progression(current_vdot, target_vdot, weeks_total, phase_alloc)
+
+    # ── Volume progression with 3:1 loading pattern ──────────────────────────
+    # Start at ~60% of max, build to max by end of Intensità, then taper
+    start_km = max(15.0, max_weekly_km * 0.55)
+    current_km = start_km
+
     today = date.today()
     days_ahead = (7 - today.weekday()) % 7 or 7
     start_date = today + timedelta(days=days_ahead)
 
-    level_pct = {"beginner": 0.50, "intermediate": 0.60, "advanced": 0.65}.get(level.lower(), 0.55)
-    current_km = max(15.0, max_weekly_km * level_pct)
-
     phase_descs = {
-        "Base Aerobica": "Costruzione della base aerobica con corse facili e progressive.",
-        "Sviluppo":      "Sviluppo della soglia aerobica con progressivi e corse a ritmo.",
-        "Intensità":     "Sviluppo di velocità e VO₂max con interval training.",
-        "Specifico":     "Lavoro specifico per la gara target con ritmi di gara.",
-        "Taper":         "Riduzione del volume per arrivare fresco al giorno della gara.",
-        "Gara":          "Settimana della gara. Mantieni le gambe fresche.",
+        "Base Aerobica": "Costruzione della base aerobica. Corse facili e progressive per sviluppare capillari e mitocondri.",
+        "Sviluppo":      "Sviluppo soglia anaerobica con lavori al ritmo T (88% VO₂max). Obiettivo: alzare il turnpoint del lattato.",
+        "Intensità":     "Stimolo VO₂max con intervalli I-pace (95–100% VO₂max). Massima crescita del VDOT in questa fase.",
+        "Specifico":     "Lavoro a ritmo gara per adattamento neuromuscolare e psicologico alla velocità target.",
+        "Taper":         "Riduzione progressiva del volume (−40/60%) mantenendo l'intensità. Supercompensazione.",
+        "Gara":          "Settimana della gara. Volume minimo, attivazioni leggere, gambe fresche.",
     }
 
     weeks = []
     week_number = 1
     current_date = start_date
+    week_idx = 0
 
     for phase_name, phase_len in phase_alloc:
         for week_in_phase in range(phase_len):
             is_recovery = (
                 phase_name not in ("Taper", "Gara") and
                 phase_len >= 3 and
-                week_in_phase == phase_len - 1
+                (week_in_phase + 1) % 4 == 0  # every 4th week = recovery
             )
 
+            # Volume strategy
             if phase_name == "Taper":
+                # Mujika & Padilla (2003): 40-60% volume reduction, maintain intensity
                 taper_pct = 0.70 - 0.15 * week_in_phase
-                week_km = max_weekly_km * max(0.40, taper_pct)
+                week_km = max_weekly_km * max(0.35, taper_pct)
             elif phase_name == "Gara":
                 week_km = max_weekly_km * 0.25
             elif is_recovery:
-                week_km = current_km * 0.70
+                week_km = current_km * 0.65  # 35% reduction
             else:
                 week_km = min(current_km, max_weekly_km)
-                current_km *= 1.08  # ~8% progressive overload
+                # Bompa periodization: ~7-10% overload per mesocycle week
+                current_km = min(current_km * 1.08, max_weekly_km)
 
             week_km = round(max(10.0, week_km), 1)
+            wv = vdot_progression[week_idx] if week_idx < len(vdot_progression) else target_vdot
+            paces = _tp_daniels_paces(wv)
+
             week_start = current_date
             week_end = current_date + timedelta(days=6)
 
-            sessions = _tp_build_sessions(week_start, week_km, phase_name, goal_race, paces)
+            sessions = _tp_build_sessions(week_start, week_km, phase_name, goal_race, paces, wv)
 
             weeks.append({
                 "athlete_id": athlete_id,
@@ -898,22 +1062,32 @@ def _generate_plan_weeks(goal_race: str, weeks_total: int, max_weekly_km: float,
                 "phase": phase_name,
                 "phase_description": phase_descs.get(phase_name, ""),
                 "target_km": week_km,
+                "target_vdot": wv,
                 "is_recovery_week": is_recovery,
                 "sessions": sessions,
+                "goal_race": goal_race,
+                "target_time": target_time_str,
             })
 
             week_number += 1
             current_date += timedelta(weeks=1)
+            week_idx += 1
 
     return weeks
 
 
 @app.post("/api/training-plan/generate")
 async def generate_training_plan(request: Request):
-    """Generate a personalized training plan based on profile and VDOT."""
+    """Generate a goal-driven training plan.
+
+    Required: goal_race, weeks_to_race, target_time (mm:ss or h:mm:ss).
+    The plan is built around the VDOT gap between current fitness and goal.
+    Each week has its own VDOT target and Daniels paces.
+    """
     body = await request.json()
     goal_race = body.get("goal_race", "Half Marathon")
     weeks_to_race = int(body.get("weeks_to_race", 16))
+    target_time_str = str(body.get("target_time", ""))
 
     athlete_id = await _get_athlete_id()
     q = {"athlete_id": athlete_id} if athlete_id else {}
@@ -925,18 +1099,67 @@ async def generate_training_plan(request: Request):
     defaults_km = {"5K": 40.0, "10K": 50.0, "Half Marathon": 60.0, "Marathon": 70.0}
     raw_max_km = (profile or {}).get("max_weekly_km")
     max_weekly_km = float(raw_max_km) if raw_max_km else defaults_km.get(goal_race, 55.0)
-    level = str((profile or {}).get("level", "intermediate"))
 
-    vdot = _calc_vdot(runs, max_hr)
-    paces = _tp_daniels_paces(vdot) if vdot else None
+    # ── Current VDOT from real runs ──────────────────────────────────────────
+    current_vdot = _calc_vdot(runs, max_hr)
+    if not current_vdot:
+        # Fallback estimate from recent run paces
+        current_vdot = 30.0  # conservative beginner estimate
 
-    weeks = _generate_plan_weeks(goal_race, weeks_to_race, max_weekly_km, level, paces, athlete_id)
+    # ── Target VDOT from goal time ───────────────────────────────────────────
+    dist_km = RACE_DISTANCES.get(goal_race, 5.0)
+    target_time_min = _parse_time_str(target_time_str)
+
+    if target_time_min and target_time_min > 0:
+        target_vdot = _time_to_vdot(dist_km, target_time_min)
+        if not target_vdot:
+            target_vdot = current_vdot  # fallback
+    else:
+        # No target time → maintain + 2 VDOT improvement
+        target_vdot = current_vdot + 2.0
+
+    target_vdot = round(min(target_vdot, 75.0), 2)  # cap at elite level
+
+    # ── Feasibility assessment ───────────────────────────────────────────────
+    feasibility = _assess_feasibility(current_vdot, target_vdot, weeks_to_race)
+
+    # If unrealistic, cap target VDOT to max achievable
+    if not feasibility["feasible"]:
+        mesocycles = weeks_to_race / 3.5
+        max_achievable = current_vdot + mesocycles * 0.5
+        target_vdot = round(min(target_vdot, max_achievable), 2)
+        # Recalculate the adjusted race prediction
+        adjusted_time = _vdot_to_race_time(target_vdot, dist_km)
+        feasibility["adjusted_target_vdot"] = target_vdot
+        feasibility["adjusted_time"] = adjusted_time
+
+    # ── Generate the plan ────────────────────────────────────────────────────
+    weeks = _generate_plan_weeks(
+        goal_race, weeks_to_race, max_weekly_km,
+        current_vdot, target_vdot, athlete_id, target_time_str,
+    )
 
     await db.training_plan.delete_many(q)
     if weeks:
         await db.training_plan.insert_many(weeks)
 
-    return {"ok": True, "weeks_generated": len(weeks)}
+    # Store goal metadata on profile
+    await db.profile.update_one(q, {"$set": {
+        "plan_goal_race": goal_race,
+        "plan_target_time": target_time_str,
+        "plan_target_vdot": target_vdot,
+        "plan_current_vdot": current_vdot,
+        "plan_weeks": weeks_to_race,
+    }})
+
+    return {
+        "ok": True,
+        "weeks_generated": len(weeks),
+        "current_vdot": current_vdot,
+        "target_vdot": target_vdot,
+        "feasibility": feasibility,
+        "race_predictions": _predict_race(target_vdot),
+    }
 
 
 @app.post("/api/training-plan/adapt")
@@ -1218,6 +1441,114 @@ async def adapt_training_plan():
         "sessions_modified": sessions_mod,
         "triggered_count": triggered_count,
     }
+
+
+async def _auto_adapt_on_sync(athlete_id) -> Optional[dict]:
+    """Called automatically after each Strava sync.
+
+    Compares actual VDOT (from latest runs) with the plan's expected VDOT
+    progression and re-calibrates future weeks' paces if they diverge.
+
+    This implements the core adaptive loop:
+    1. Recalculate VDOT from ALL valid runs
+    2. Find current week in plan → what was the expected VDOT?
+    3. If actual VDOT > expected: runner is ahead → raise future paces
+    4. If actual VDOT < expected: runner is behind → lower future paces
+    5. If |delta| < 0.5: within normal variance → no change
+    """
+    from datetime import date, timedelta
+
+    q = {"athlete_id": athlete_id} if athlete_id else {}
+    profile = await db.profile.find_one(q)
+    if not profile:
+        return None
+
+    max_hr = int(profile.get("max_hr", 190))
+    runs = await db.runs.find(q).sort("date", -1).to_list(500)
+    actual_vdot = _calc_vdot(runs, max_hr)
+    if not actual_vdot:
+        return None
+
+    all_weeks = await db.training_plan.find(q).sort("week_number", 1).to_list(100)
+    if not all_weeks:
+        return None
+
+    # ── Find current week ────────────────────────────────────────────────────
+    today_s = date.today().isoformat()
+    current_week = None
+    for w in all_weeks:
+        if w.get("week_start", "") <= today_s <= w.get("week_end", ""):
+            current_week = w
+            break
+    if not current_week:
+        return None
+
+    expected_vdot = current_week.get("target_vdot")
+    if not expected_vdot:
+        return None
+
+    delta = round(actual_vdot - expected_vdot, 2)
+    result = {
+        "actual_vdot": actual_vdot,
+        "expected_vdot": expected_vdot,
+        "delta": delta,
+        "action": "none",
+        "weeks_updated": 0,
+    }
+
+    # ── Threshold: only adapt if delta >= 0.5 VDOT ──────────────────────────
+    if abs(delta) < 0.5:
+        result["action"] = "within_tolerance"
+        return result
+
+    # ── Recalibrate future weeks ─────────────────────────────────────────────
+    future_weeks = [w for w in all_weeks if w.get("week_start", "") > today_s]
+    if not future_weeks:
+        return result
+
+    target_vdot_plan = profile.get("plan_target_vdot", expected_vdot)
+    goal_race = current_week.get("goal_race", "Half Marathon")
+
+    updated = 0
+    for w in future_weeks:
+        old_wv = w.get("target_vdot", expected_vdot)
+        # Shift the weekly target by the delta (capped to not exceed plan target)
+        new_wv = round(old_wv + delta, 2)
+        if delta > 0:
+            new_wv = min(new_wv, target_vdot_plan + 1.0)  # don't overshoot much
+        else:
+            new_wv = max(new_wv, actual_vdot - 1.0)  # don't undershoot much
+
+        if abs(new_wv - old_wv) < 0.2:
+            continue  # skip trivial changes
+
+        new_paces = _tp_daniels_paces(new_wv)
+        pace_map = {
+            "easy": new_paces.get("easy"), "long": new_paces.get("easy"),
+            "tempo": new_paces.get("threshold"), "intervals": new_paces.get("interval"),
+        }
+
+        sessions = [dict(s) for s in w.get("sessions", [])]
+        for s in sessions:
+            if s["type"] != "rest" and not s.get("completed"):
+                np = pace_map.get(s["type"])
+                if np:
+                    s["target_pace"] = np
+
+        await db.training_plan.update_one(
+            {"athlete_id": athlete_id, "week_number": w["week_number"]},
+            {"$set": {"target_vdot": new_wv, "sessions": sessions}},
+        )
+        updated += 1
+
+    direction = "ahead" if delta > 0 else "behind"
+    result["action"] = f"recalibrated_{direction}"
+    result["weeks_updated"] = updated
+
+    # Store latest actual VDOT on profile
+    await db.profile.update_one(q, {"$set": {"plan_current_vdot": actual_vdot}})
+
+    return result
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

@@ -40,8 +40,23 @@ export const getCurrentWeek = () => api.get<TrainingPlanResponse['weeks'][0]>('/
 export const toggleSessionComplete = (weekId: string, sessionIndex: number, completed: boolean) =>
   api.patch('/api/training-plan/session/complete', { week_id: weekId, session_index: sessionIndex, completed });
 
-export const generateTrainingPlan = (data: { goal_race: string; weeks_to_race: number }) =>
-  api.post<{ ok: boolean; weeks_generated: number }>('/api/training-plan/generate', data);
+export const generateTrainingPlan = (data: { goal_race: string; weeks_to_race: number; target_time?: string }) =>
+  api.post<{
+    ok: boolean;
+    weeks_generated: number;
+    current_vdot: number;
+    target_vdot: number;
+    feasibility: {
+      feasible: boolean;
+      difficulty: string;
+      message: string;
+      confidence_pct: number;
+      adjusted_target_vdot?: number;
+      adjusted_time?: string;
+      suggested_weeks?: number;
+    };
+    race_predictions: Record<string, string>;
+  }>('/api/training-plan/generate', data);
 
 export const adaptTrainingPlan = () =>
   api.post<AdaptResponse>('/api/training-plan/adapt');

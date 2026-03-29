@@ -98,8 +98,11 @@ export interface TrainingWeek {
   phase: string;
   phase_description: string;
   target_km: number;
+  target_vdot?: number;
   is_recovery_week: boolean;
   sessions: Session[];
+  goal_race?: string;
+  target_time?: string;
 }
 
 export interface TrainingPlanResponse {

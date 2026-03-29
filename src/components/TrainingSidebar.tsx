@@ -212,8 +212,8 @@ export function TrainingSidebar() {
 
         {/* Week progress summary */}
         {currentWeek && (
-          <div className="mt-6 p-4 bg-[#121212] rounded-xl border border-[#2A2A2A]">
-            <div className="flex justify-between text-xs text-gray-500 mb-2">
+          <div className="mt-6 p-4 bg-[#121212] rounded-xl border border-[#2A2A2A] space-y-2">
+            <div className="flex justify-between text-xs text-gray-500">
               <span>Target settimana</span>
               <span className="text-white font-bold">{currentWeek.target_km} km</span>
             </div>
@@ -221,8 +221,20 @@ export function TrainingSidebar() {
               <span>Fase</span>
               <span className="text-gray-300">{currentWeek.phase}</span>
             </div>
+            {currentWeek.target_vdot && (
+              <div className="flex justify-between text-xs text-gray-500">
+                <span>VDOT target</span>
+                <span className="text-[#3B82F6] font-bold font-mono">{currentWeek.target_vdot}</span>
+              </div>
+            )}
+            {currentWeek.goal_race && currentWeek.target_time && (
+              <div className="flex justify-between text-xs text-gray-500">
+                <span>Obiettivo</span>
+                <span className="text-[#10B981] font-bold">{currentWeek.goal_race} in {currentWeek.target_time}</span>
+              </div>
+            )}
             {currentWeek.is_recovery_week && (
-              <div className="mt-2 text-xs text-amber-400">↓ Settimana di recupero</div>
+              <div className="text-xs text-amber-400">↓ Settimana di recupero</div>
             )}
           </div>
         )}
