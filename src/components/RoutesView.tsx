@@ -1,58 +1,13 @@
-import React, { useState, useMemo, useRef, useEffect } from 'react';
-import Map, { Source, Layer, NavigationControl, Marker, Popup, MapRef } from 'react-map-gl/maplibre';
-import 'maplibre-gl/dist/maplibre-gl.css';
-import {
-  Activity, Mountain, Timer, Zap, Heart, Wind, AlertTriangle,
-  Play, Pause, RotateCcw, Layers, ChevronRight, ChevronLeft,
-  Info, Target, Gauge, TrendingUp, Map as MapIcon, Search, Calendar
-} from 'lucide-react';
-import {
-  AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip,
-  ResponsiveContainer, ReferenceLine, ComposedChart, Line
-} from 'recharts';
-import { motion, AnimatePresence } from 'motion/react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import Map, { Source, Layer, Marker, useMap, Popup } from 'react-map-gl';
+import mapboxgl from 'mapbox-gl';
+import 'mapbox-gl/dist/mapbox-gl.css';
+import * as turf from '@turf/turf';
+import { Play, Pause, Activity, MapPin, Clock, Zap, Target, ChevronRight, RefreshCcw } from 'lucide-react';
+import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine } from 'recharts';
 import { cn } from '../lib/utils';
-import { useApi } from '../hooks/useApi';
-import { getRun, getRunSplits } from '../api';
-import type { Run, Split } from '../types/api';
 
-// ── Polyline decoder (Google algorithm) ──────────────────────────────────────
-function decodePolyline(encoded: string): [number, number][] {
-  const points: [number, number][] = [];
-  let index = 0, lat = 0, lng = 0;
-  while (index < encoded.length) {
-    let shift = 0, result = 0, byte: number;
-    do { byte = encoded.charCodeAt(index++) - 63; result |= (byte & 0x1f) << shift; shift += 5; } while (byte >= 0x20);
-    lat += (result & 1) ? ~(result >> 1) : (result >> 1);
-    shift = 0; result = 0;
-    do { byte = encoded.charCodeAt(index++) - 63; result |= (byte & 0x1f) << shift; shift += 5; } while (byte >= 0x20);
-    lng += (result & 1) ? ~(result >> 1) : (result >> 1);
-    points.push([lng / 1e5, lat / 1e5]); // [lng, lat] for maplibre
-  }
-  return points;
-}
-
-// ── Helpers ──────────────────────────────────────────────────────────────────
-function formatDate(dateStr: string): string {
-  return new Date(dateStr).toLocaleDateString('en-US', {
-    weekday: 'long', month: 'long', day: 'numeric', year: 'numeric',
-  }).toUpperCase();
-}
-
-function formatDuration(minutes: number): string {
-  const h = Math.floor(minutes / 60);
-  const m = Math.floor(minutes % 60);
-  const s = Math.round((minutes % 1) * 60);
-  if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
-  return `${m}:${String(s).padStart(2, '0')}`;
-}
-
-function paceToSeconds(pace: string): number {
-  const parts = pace.split(':');
-  return (parseInt(parts[0]) || 0) * 60 + (parseInt(parts[1]) || 0);
-}
-
-// ── Components ───────────────────────────────────────────────────────────────
+// --- COMPONENTS ---
 
 const GlassPanel = ({ children, className, title, icon: Icon }: any) => (
   <div className={cn(
@@ -60,583 +15,709 @@ const GlassPanel = ({ children, className, title, icon: Icon }: any) => (
     className
   )}>
     {title && (
-      <div className="px-6 py-4 border-b border-white/5 flex items-center justify-between bg-white/5">
-        <div className="flex items-center gap-3">
-          {Icon && <Icon className="w-4 h-4 text-[#C0FF00]" />}
-          <h3 className="text-[10px] font-black uppercase tracking-[0.2em] text-gray-400">{title}</h3>
-        </div>
-        <div className="flex gap-1">
-          <div className="w-1.5 h-1.5 rounded-full bg-[#C0FF00]/50" />
-          <div className="w-1.5 h-1.5 rounded-full bg-[#C0FF00]/20" />
-        </div>
+      <div className="px-6 py-4 border-b border-white/5 flex items-center gap-3">
+        {Icon && <Icon className="w-4 h-4 text-[#C0FF00]" />}
+        <h3 className="text-xs font-black uppercase tracking-widest text-white/80">{title}</h3>
       </div>
     )}
-    <div className="p-6">{children}</div>
+    <div className="p-6">
+      {children}
+    </div>
   </div>
 );
 
-// ── Main View ────────────────────────────────────────────────────────────────
-
-export function RoutesView({ runId }: { runId?: string | null }) {
-  const mapRef = useRef<MapRef>(null);
-  const [activeSplit, setActiveSplit] = useState<number | null>(null);
+export function RoutesView({ mapboxToken }: { mapboxToken: string }) {
+  const mapRef = useRef<any>(null);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [playbackIndex, setPlaybackIndex] = useState(0);
   const [mapMode, setMapMode] = useState<'pace' | 'hr' | 'elevation'>('pace');
-  const [drawProgress, setDrawProgress] = useState(0);
-  const [chartMetrics, setChartMetrics] = useState<Set<string>>(new Set(['pace']));
-  const [hoveredStreamIdx, setHoveredStreamIdx] = useState<number | null>(null);
+  const [mapTooltip, setMapTooltip] = useState<any>(null);
+  const [activeSplit, setActiveSplit] = useState<number | null>(null);
+  const [showGhostRunner, setShowGhostRunner] = useState(true);
+  const [currentBearing, setCurrentBearing] = useState(0);
+  const [playbackSpeed, setPlaybackSpeed] = useState(1);
+  
+  const [runData, setRunData] = useState<any[] | null>(null);
+  const [splits, setSplits] = useState<any[]>([]);
 
-  const toggleChartMetric = (metric: string) => {
-    setChartMetrics(prev => {
-      const next = new Set(prev);
-      if (next.has(metric)) {
-        if (next.size > 1) next.delete(metric);
-      } else {
-        next.add(metric);
-      }
-      return next;
-    });
-  };
-
-  // Fetch real run data
-  const { data: run, loading, error } = useApi<Run>(() => getRun(runId ?? ''));
-
-  // Per-point streams data
-  const streams: any[] = (run as any)?.streams ?? [];
-
-  // Decode polyline
-  const routeCoords = useMemo(() => {
-    if (!run) return [];
-    const poly = (run as any).polyline;
-    if (poly) return decodePolyline(poly);
-    return [];
-  }, [run]);
-
-  const splits: Split[] = run?.splits ?? [];
-
-  // Chart data from streams (detailed) or fallback to splits
-  const chartData = useMemo(() => {
-    if (streams.length > 0) {
-      return streams.map((pt: any, i: number) => ({
-        idx: i,
-        dist: pt.d ? (pt.d / 1000).toFixed(1) : '',
-        pace: pt.pace ?? null,
-        hr: pt.hr ?? null,
-        cadence: pt.cad ?? null,
-        alt: pt.alt ?? null,
-        ll: pt.ll ?? null,
-      }));
-    }
-    // Fallback to splits
-    return splits.map((s) => ({
-      idx: s.km,
-      dist: `${s.km}`,
-      pace: paceToSeconds(s.pace),
-      hr: s.hr != null ? Math.round(s.hr) : null,
-      cadence: s.cadence ?? null,
-      alt: s.elevation_difference ?? null,
-      ll: null,
-    }));
-  }, [streams, splits]);
-
-  // Hovered point for map marker
-  const hoveredPoint = useMemo(() => {
-    if (hoveredStreamIdx == null || !chartData[hoveredStreamIdx]) return null;
-    const pt = chartData[hoveredStreamIdx];
-    if (pt.ll) return { lat: pt.ll[0], lng: pt.ll[1] };
-    // Fallback: interpolate from route coords
-    if (routeCoords.length > 0) {
-      const ratio = hoveredStreamIdx / Math.max(chartData.length - 1, 1);
-      const coordIdx = Math.min(Math.floor(ratio * routeCoords.length), routeCoords.length - 1);
-      const c = routeCoords[coordIdx];
-      return { lat: c[1], lng: c[0] };
-    }
-    return null;
-  }, [hoveredStreamIdx, chartData, routeCoords]);
-
-  // Calculate map center from route
-  const center = useMemo(() => {
-    if (routeCoords.length === 0) {
-      const sl = (run as any)?.start_latlng;
-      if (sl && sl.length === 2) return { lng: sl[1], lat: sl[0] };
-      return { lng: 9.19, lat: 45.46 };
-    }
-    const mid = routeCoords[Math.floor(routeCoords.length / 2)];
-    return { lng: mid[0], lat: mid[1] };
-  }, [routeCoords, run]);
-
-  // Calculate bounds
-  const bounds = useMemo(() => {
-    if (routeCoords.length < 2) return null;
-    let minLng = Infinity, maxLng = -Infinity, minLat = Infinity, maxLat = -Infinity;
-    for (const [lng, lat] of routeCoords) {
-      if (lng < minLng) minLng = lng;
-      if (lng > maxLng) maxLng = lng;
-      if (lat < minLat) minLat = lat;
-      if (lat > maxLat) maxLat = lat;
-    }
-    return { minLng, maxLng, minLat, maxLat };
-  }, [routeCoords]);
-
-  // Animate route drawing
+  // Fetch real road-snapped route
   useEffect(() => {
-    const duration = 2000;
-    const start = performance.now();
-    const animate = (time: number) => {
-      const elapsed = time - start;
-      const progress = Math.min(elapsed / duration, 1);
-      setDrawProgress(progress);
-      if (progress < 1) requestAnimationFrame(animate);
-    };
-    requestAnimationFrame(animate);
-  }, [runId, routeCoords]);
+    async function loadRealRoute() {
+      try {
+        // Waypoints for a loop around Rome (Colosseum -> Termini -> Piazza Venezia -> Colosseum)
+        const waypoints = [
+          "12.4905,41.8892", // Colosseum south
+          "12.4965,41.8895", // Via Labicana
+          "12.5050,41.8890", // Viale Manzoni
+          "12.5010,41.9010", // Termini
+          "12.4930,41.9000", // Via Nazionale
+          "12.4830,41.8960", // Piazza Venezia
+          "12.4905,41.8892"  // Back to Colosseum
+        ].join(';');
 
-  // Fit map to route bounds
-  useEffect(() => {
-    if (bounds && mapRef.current && routeCoords.length > 0) {
-      const pad = 0.002;
-      mapRef.current.fitBounds(
-        [[bounds.minLng - pad, bounds.minLat - pad], [bounds.maxLng + pad, bounds.maxLat + pad]],
-        { padding: { top: 80, bottom: 120, left: 380, right: 280 }, pitch: 45, duration: 1500 }
-      );
-    }
-  }, [bounds, routeCoords]);
+        const url = `https://api.mapbox.com/directions/v5/mapbox/cycling/${waypoints}?geometries=geojson&access_token=${mapboxToken}`;
+        const res = await fetch(url);
+        const json = await res.json();
 
-  // Build GeoJSON for the route
-  const visibleCoords = routeCoords.slice(0, Math.floor(routeCoords.length * drawProgress));
-
-  const segmentedLines: any = useMemo(() => {
-    if (visibleCoords.length < 2) return { type: 'FeatureCollection', features: [] };
-
-    // Distribute splits across route points
-    const totalSplits = splits.length || 1;
-
-    return {
-      type: 'FeatureCollection',
-      features: visibleCoords.slice(0, -1).map((coord, i) => {
-        const next = visibleCoords[i + 1];
-        const splitIdx = Math.min(Math.floor((i / visibleCoords.length) * totalSplits), totalSplits - 1);
-        const split = splits[splitIdx];
-
-        let color = '#3B82F6';
-        if (split) {
-          const paceSec = paceToSeconds(split.pace);
-          if (mapMode === 'pace') {
-            color = paceSec < 270 ? '#10B981' : paceSec < 330 ? '#3B82F6' : '#F59E0B';
-          } else if (mapMode === 'hr') {
-            const hr = split.hr ?? 150;
-            color = hr > 170 ? '#EF4444' : hr > 155 ? '#F59E0B' : '#10B981';
-          } else if (mapMode === 'elevation') {
-            const elDiff = split.elevation_difference ?? 0;
-            color = elDiff > 0 ? '#EF4444' : '#10B981';
-          }
+        if (!json.routes || json.routes.length === 0) {
+          throw new Error("No route found");
         }
 
-        return {
-          type: 'Feature',
-          geometry: { type: 'LineString', coordinates: [coord, next] },
-          properties: { color, width: 4, id: i },
-        };
-      }),
+        const coords = json.routes[0].geometry.coordinates;
+        const routeLine = turf.lineString(coords);
+        const totalLengthKm = turf.length(routeLine, { units: 'kilometers' });
+        
+        const totalPoints = 1000;
+        const points: any[] = [];
+
+        for (let i = 0; i < totalPoints; i++) {
+          const progress = i / (totalPoints - 1);
+          const distanceAlong = progress * totalLengthKm;
+          const pointAlong = turf.along(routeLine, distanceAlong, { units: 'kilometers' });
+          const [lng, lat] = pointAlong.geometry.coordinates;
+          
+          let baseElev = 20;
+          if (progress > 0.35 && progress < 0.65) {
+              baseElev += Math.sin((progress - 0.35) * Math.PI / 0.3) * 40;
+          }
+          
+          const elevation = baseElev + Math.random() * 2;
+          const heartRate = 140 + (elevation > 30 ? 25 : 0) + Math.random() * 10;
+          const pace = 4.5 + (elevation > 30 ? 1.0 : 0) + Math.random() * 0.5;
+          const cadence = 175 + Math.random() * 10;
+          const power = 250 + (elevation > 30 ? 50 : 0) + Math.random() * 20;
+          
+          points.push({
+            id: i,
+            coordinates: [lng, lat] as [number, number],
+            elevation,
+            heartRate,
+            pace,
+            cadence,
+            power,
+            distance: distanceAlong,
+            timestamp: i * 30
+          });
+        }
+
+        setRunData(points);
+
+        // Generate Splits
+        const newSplits = Array.from({ length: Math.ceil(points[points.length - 1].distance) }).map((_, i) => {
+          const segment = points.filter(p => p.distance >= i && p.distance < i + 1);
+          if (segment.length === 0) return null;
+          const avgPace = segment.reduce((acc, p) => acc + p.pace, 0) / segment.length;
+          const avgHR = segment.reduce((acc, p) => acc + p.heartRate, 0) / segment.length;
+          const elevGain = Math.max(0, segment[segment.length - 1].elevation - segment[0].elevation);
+          
+          return {
+            km: i + 1,
+            pace: avgPace.toFixed(2),
+            hr: Math.round(avgHR),
+            elevation: `+${Math.round(elevGain)}m`,
+            gap: (avgPace - (elevGain > 5 ? 0.2 : 0)).toFixed(2),
+            intensity: avgHR > 165 ? 'high' : avgHR > 150 ? 'med' : 'low'
+          };
+        }).filter(Boolean) as any[];
+
+        setSplits(newSplits);
+
+      } catch (error) {
+        console.error("Failed to load real route:", error);
+      }
+    }
+
+    loadRealRoute();
+  }, [mapboxToken]);
+
+  // Calculate total distance for the progress bar
+  const totalDistance = runData ? runData[runData.length - 1].distance : 0;
+  const drawProgress = runData ? playbackIndex / (runData.length - 1) : 0;
+
+  const playbackPoint = useMemo(() => {
+    if (!runData || runData.length === 0) return null;
+    
+    // Handle NaN or invalid playbackIndex
+    if (typeof playbackIndex !== 'number' || isNaN(playbackIndex)) {
+      return runData[0];
+    }
+
+    const i = Math.floor(playbackIndex);
+    const f = playbackIndex - i;
+    
+    if (i >= runData.length - 1) return runData[runData.length - 1];
+    if (i < 0) return runData[0];
+    
+    const p1 = runData[i];
+    const p2 = runData[i + 1];
+    
+    if (!p1 || !p2) return runData[0];
+    
+    return {
+      ...p1,
+      distance: p1.distance + (p2.distance - p1.distance) * f,
+      pace: p1.pace + (p2.pace - p1.pace) * f,
+      heartRate: p1.heartRate + (p2.heartRate - p1.heartRate) * f,
+      coordinates: [
+        p1.coordinates[0] + (p2.coordinates[0] - p1.coordinates[0]) * f,
+        p1.coordinates[1] + (p2.coordinates[1] - p1.coordinates[1]) * f
+      ]
     };
-  }, [visibleCoords, splits, mapMode]);
+  }, [playbackIndex, runData]);
 
-  // Run title from notes
-  const runTitle = run?.notes
-    ? run.notes.replace('Importata da Strava: ', '').replace(/(\s*\[Strava:[^\]]*\])+/g, '').trim() || `Run ${run.distance_km?.toFixed(1)} km`
-    : `Run ${run?.distance_km?.toFixed(1) ?? '—'} km`;
+  const currentDistance = playbackPoint ? playbackPoint.distance : 0;
 
-  if (loading) {
+  // Map Load Configuration
+  const onMapLoad = useCallback((e: any) => {
+    const map = e.target;
+
+    // Initial fit to bounds
+    if (runData) {
+      const coordinates = runData.map(p => p.coordinates);
+      const bounds = coordinates.reduce((bounds, coord) => {
+        return bounds.extend(coord as [number, number]);
+      }, new mapboxgl.LngLatBounds(coordinates[0], coordinates[0]));
+
+      map.fitBounds(bounds, {
+        padding: 50,
+        pitch: 45,
+        bearing: -20,
+        duration: 2000
+      });
+    }
+  }, [runData]);
+
+  // Handle Play/Pause
+  const togglePlayback = () => {
+    if (!runData) return;
+    if (playbackIndex >= runData.length - 1) {
+      setPlaybackIndex(0);
+    }
+    setIsPlaying(!isPlaying);
+  };
+
+  // Stop playback on manual map interaction
+  const handleMapInteraction = () => {
+    if (isPlaying) setIsPlaying(false);
+  };
+
+  // Animation Loop
+  useEffect(() => {
+    let animationFrame: number;
+    let lastTime = performance.now();
+
+    const animate = (time: number) => {
+      if (!isPlaying) return;
+
+      const deltaTime = time - lastTime;
+      lastTime = time;
+      
+      setPlaybackIndex(prev => {
+        if (!runData) return prev;
+        // Advance by 15 points per second for a nice speed
+        const nextIndex = prev + (deltaTime / 1000) * 15 * playbackSpeed;
+        return Math.min(nextIndex, runData.length - 1);
+      });
+      
+      animationFrame = requestAnimationFrame(animate);
+    };
+
+    if (isPlaying) {
+      lastTime = performance.now();
+      animationFrame = requestAnimationFrame(animate);
+    }
+    return () => cancelAnimationFrame(animationFrame);
+  }, [isPlaying, runData, playbackSpeed]);
+
+  // Stop playback when reaching the end
+  useEffect(() => {
+    if (isPlaying && runData && playbackIndex >= runData.length - 1) {
+      setIsPlaying(false);
+    }
+  }, [playbackIndex, runData, isPlaying]);
+
+  // Camera Sync - Calculate Bearing
+  useEffect(() => {
+    if (isPlaying && runData && playbackPoint) {
+      const i = Math.floor(playbackIndex);
+      const next = runData[Math.min(i + 15, runData.length - 1)]; // Look further ahead for smoother bearing
+      
+      const targetBearing = turf.bearing(
+        turf.point(playbackPoint.coordinates),
+        turf.point(next.coordinates)
+      );
+
+      setCurrentBearing(prev => {
+        // Smooth interpolation for bearing
+        const delta = ((targetBearing - prev + 540) % 360) - 180;
+        return prev + delta * 0.08; // Smoothing factor
+      });
+    }
+  }, [playbackIndex, isPlaying, runData, playbackPoint]);
+
+  // Camera Sync - Update Map
+  useEffect(() => {
+    if (isPlaying && mapRef.current && playbackPoint) {
+      mapRef.current.jumpTo({
+        center: playbackPoint.coordinates,
+        bearing: currentBearing,
+        pitch: 70, // Bird's-eye view angle
+        zoom: 18 // Closer zoom for navigation feel
+      });
+    }
+  }, [currentBearing, playbackPoint, isPlaying]);
+
+  // GeoJSON Data
+  const fullRouteGeoJSON: any = useMemo(() => {
+    if (!runData) return null;
+    return {
+      type: 'Feature',
+      geometry: {
+        type: 'LineString',
+        coordinates: runData.map(p => p.coordinates)
+      }
+    };
+  }, [runData]);
+
+  const completedRouteGeoJSON: any = useMemo(() => {
+    if (!runData) return null;
+    const i = Math.floor(playbackIndex);
+    const coords = runData.slice(0, i + 1).map(p => p.coordinates);
+    if (playbackPoint) {
+      coords.push(playbackPoint.coordinates);
+    }
+    return {
+      type: 'Feature',
+      geometry: {
+        type: 'LineString',
+        coordinates: coords
+      }
+    };
+  }, [playbackIndex, runData, playbackPoint]);
+
+  // Ghost Runner Data (slightly faster than current)
+  const ghostIndex = runData ? Math.min(runData.length - 1, Math.floor(playbackIndex * 1.08)) : 0;
+  const ghostPoint = runData ? runData[ghostIndex] : null;
+
+  const handleMapHover = (e: any) => {
+    if (e.features && e.features.length > 0 && runData) {
+      const feature = e.features[0];
+      const pointIndex = feature.properties.id;
+      const point = runData[pointIndex];
+      if (point) {
+        setMapTooltip({
+          lngLat: e.lngLat,
+          data: point
+        });
+      }
+    } else {
+      setMapTooltip(null);
+    }
+  };
+
+  if (!runData || splits.length === 0) {
     return (
-      <main className="flex-1 flex items-center justify-center bg-[#020202]">
-        <div className="text-gray-500 text-sm font-black uppercase tracking-widest animate-pulse">Loading run data...</div>
-      </main>
-    );
-  }
-
-  if (error || !run) {
-    return (
-      <main className="flex-1 flex items-center justify-center bg-[#020202]">
-        <div className="text-rose-400 text-sm font-bold">Errore nel caricamento della corsa</div>
-      </main>
+      <div className="flex items-center justify-center h-screen w-full bg-[#050505] text-white font-sans">
+        <div className="flex flex-col items-center gap-4">
+          <div className="w-12 h-12 border-4 border-[#C0FF00] border-t-transparent rounded-full animate-spin" />
+          <div className="text-sm font-black tracking-widest uppercase text-gray-400">Loading GPS Telemetry...</div>
+        </div>
+      </div>
     );
   }
 
   return (
-    <main className="flex-1 relative h-full overflow-hidden bg-[#020202] font-sans">
-      {/* PRIMARY UI LAYER: THE MAP */}
-      <div className="absolute inset-0 z-0">
+    <div className="flex h-screen w-full bg-[#050505] text-white overflow-hidden font-sans">
+      
+      {/* LEFT PANEL: List & Stats (50%) */}
+      <div className="w-1/2 h-full flex flex-col border-r border-white/10 z-10 relative shadow-[20px_0_50px_rgba(0,0,0,0.5)]">
+        
+        {/* Header */}
+        <div className="p-8 pb-6 shrink-0">
+          <div className="flex items-center gap-3 mb-2">
+            <div className="w-2 h-2 rounded-full bg-[#C0FF00] animate-pulse" />
+            <span className="text-[10px] font-black tracking-[0.2em] text-[#C0FF00] uppercase">Live Telemetry</span>
+          </div>
+          <h1 className="text-5xl font-black tracking-tighter mb-2">Morning Trail Run</h1>
+          <p className="text-gray-400 font-medium flex items-center gap-2">
+            <MapPin className="w-4 h-4" /> Rome, Italy • 10.0 km
+          </p>
+        </div>
+
+        {/* Scrollable Content */}
+        <div className="flex-1 overflow-y-auto px-8 pb-8 space-y-6 custom-scrollbar">
+          
+          {/* Main Stats Grid */}
+          <div className="grid grid-cols-3 gap-4">
+            <GlassPanel className="p-0">
+              <div className="text-[10px] font-black text-gray-500 uppercase tracking-widest mb-1">Distance</div>
+              <div className="text-3xl font-black italic tracking-tight">{currentDistance.toFixed(2)}<span className="text-lg text-gray-500 ml-1">km</span></div>
+            </GlassPanel>
+            <GlassPanel className="p-0">
+              <div className="text-[10px] font-black text-gray-500 uppercase tracking-widest mb-1">Pace</div>
+              <div className="text-3xl font-black italic tracking-tight">{playbackPoint?.pace?.toFixed(2) || '0.00'}<span className="text-lg text-gray-500 ml-1">/km</span></div>
+            </GlassPanel>
+            <GlassPanel className="p-0">
+              <div className="text-[10px] font-black text-gray-500 uppercase tracking-widest mb-1">Heart Rate</div>
+              <div className="text-3xl font-black italic tracking-tight text-rose-500">{Math.round(playbackPoint?.heartRate || 0)}<span className="text-lg text-gray-500 ml-1">bpm</span></div>
+            </GlassPanel>
+          </div>
+
+          {/* Playback Controls */}
+          <GlassPanel className="flex items-center gap-6">
+            <button 
+              onClick={togglePlayback}
+              className="w-16 h-16 rounded-full bg-[#C0FF00] text-black flex items-center justify-center hover:scale-105 active:scale-95 transition-all shadow-[0_0_30px_rgba(192,255,0,0.3)] shrink-0"
+            >
+              {isPlaying ? <Pause className="w-6 h-6 fill-current" /> : <Play className="w-6 h-6 fill-current ml-1" />}
+            </button>
+            <div className="flex-1 flex flex-col gap-3">
+              <div className="flex justify-between items-center">
+                <div className="flex bg-white/5 p-1 rounded-lg">
+                  {[0.5, 1, 2, 4].map(speed => (
+                    <button 
+                      key={speed}
+                      onClick={() => setPlaybackSpeed(speed)}
+                      className={cn(
+                        "px-3 py-1.5 rounded-md text-[10px] font-black uppercase tracking-wider transition-all min-w-[36px]",
+                        playbackSpeed === speed 
+                          ? "bg-[#C0FF00] text-black shadow-sm" 
+                          : "text-gray-400 hover:text-white hover:bg-white/5"
+                      )}
+                    >
+                      {speed}x
+                    </button>
+                  ))}
+                </div>
+                <div className="text-[10px] font-black text-gray-500 uppercase tracking-widest">
+                  {Math.round(drawProgress * 100)}%
+                </div>
+              </div>
+              <div className="h-2 bg-white/10 rounded-full overflow-hidden cursor-pointer" onClick={(e) => {
+                const rect = e.currentTarget.getBoundingClientRect();
+                if (rect.width > 0) {
+                  const percent = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+                  setPlaybackIndex(percent * (runData!.length - 1));
+                }
+              }}>
+                <div 
+                  className="h-full bg-gradient-to-r from-blue-500 to-[#C0FF00] transition-all duration-100 ease-linear"
+                  style={{ width: `${drawProgress * 100}%` }}
+                />
+              </div>
+            </div>
+          </GlassPanel>
+
+          {/* Elevation & Pace Chart */}
+          <GlassPanel title="Elevation & Pace Profile" icon={Activity} className="p-0">
+            <div className="h-48 w-full mt-4">
+              <ResponsiveContainer width="100%" height="100%">
+                <AreaChart data={runData} margin={{ top: 5, right: 0, left: 0, bottom: 0 }}>
+                  <defs>
+                    <linearGradient id="colorElev" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor="#3B82F6" stopOpacity={0.3}/>
+                      <stop offset="95%" stopColor="#3B82F6" stopOpacity={0}/>
+                    </linearGradient>
+                  </defs>
+                  <Tooltip 
+                    content={({ active, payload }) => {
+                      if (active && payload && payload.length) {
+                        const data = payload[0].payload;
+                        return (
+                          <div className="bg-[#0F172A]/90 backdrop-blur-md border border-white/10 p-3 rounded-xl shadow-xl">
+                            <div className="text-[10px] font-bold text-gray-400 mb-1">KM {data.distance.toFixed(1)}</div>
+                            <div className="text-sm font-black text-white">{Math.round(data.elevation)}m Elev</div>
+                            <div className="text-sm font-black text-[#C0FF00]">{data.pace.toFixed(2)} /km</div>
+                          </div>
+                        );
+                      }
+                      return null;
+                    }}
+                  />
+                  <Area 
+                    type="monotone" 
+                    dataKey="elevation" 
+                    stroke="#3B82F6" 
+                    strokeWidth={2}
+                    fillOpacity={1} 
+                    fill="url(#colorElev)" 
+                  />
+                  {/* Sync line with playback */}
+                  <ReferenceLine x={playbackIndex} stroke="#C0FF00" strokeWidth={2} strokeDasharray="3 3" />
+                </AreaChart>
+              </ResponsiveContainer>
+            </div>
+          </GlassPanel>
+
+          {/* Splits List */}
+          <GlassPanel title="Kilometer Splits" icon={Clock} className="p-0">
+            <div className="divide-y divide-white/5">
+              {splits.map((split, i) => (
+                <div 
+                  key={i} 
+                  className={cn(
+                    "flex items-center justify-between p-4 hover:bg-white/5 transition-colors cursor-pointer group",
+                    activeSplit === i && "bg-white/5"
+                  )}
+                  onMouseEnter={() => {
+                    setActiveSplit(i);
+                    // Optional: Fly to split on map
+                    const splitPoint = runData?.find(p => p.distance >= split.km);
+                    if (splitPoint && mapRef.current && !isPlaying) {
+                      mapRef.current.flyTo({
+                        center: splitPoint.coordinates,
+                        zoom: 15,
+                        pitch: 45,
+                        duration: 1000
+                      });
+                    }
+                  }}
+                  onMouseLeave={() => setActiveSplit(null)}
+                  onClick={() => {
+                    const splitIndex = runData?.findIndex(p => p.distance >= split.km);
+                    if (splitIndex !== undefined && splitIndex !== -1) {
+                      setPlaybackIndex(splitIndex);
+                      setIsPlaying(true);
+                    }
+                  }}
+                >
+                  <div className="flex items-center gap-4">
+                    <div className="w-8 h-8 rounded-full bg-white/5 flex items-center justify-center text-xs font-black text-gray-400 group-hover:text-white transition-colors">
+                      {split.km}
+                    </div>
+                    <div>
+                      <div className="font-black italic text-lg">{split.pace}</div>
+                      <div className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">GAP {split.gap}</div>
+                    </div>
+                  </div>
+                  
+                  <div className="flex items-center gap-6 text-right">
+                    <div>
+                      <div className={cn(
+                        "font-black italic text-lg",
+                        split.intensity === 'high' ? 'text-rose-500' : split.intensity === 'med' ? 'text-amber-500' : 'text-emerald-500'
+                      )}>
+                        {split.hr}
+                      </div>
+                      <div className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">BPM</div>
+                    </div>
+                    <div className="w-16">
+                      <div className="font-black italic text-lg text-blue-400">{split.elevation}</div>
+                      <div className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">ELEV</div>
+                    </div>
+                    <ChevronRight className="w-4 h-4 text-gray-600 group-hover:text-white transition-colors" />
+                  </div>
+                </div>
+              ))}
+            </div>
+          </GlassPanel>
+
+        </div>
+      </div>
+
+      {/* RIGHT PANEL: Mapbox 3D (50%) */}
+      <div className="w-1/2 h-full relative bg-[#1A1A1A]">
         <Map
           ref={mapRef}
+          mapboxAccessToken={mapboxToken}
           initialViewState={{
-            longitude: center.lng,
-            latitude: center.lat,
+            longitude: runData[0].coordinates[0],
+            latitude: runData[0].coordinates[1],
             zoom: 14,
             pitch: 45,
+            bearing: -20
           }}
-          mapStyle="https://tiles.openfreemap.org/styles/dark"
-          style={{ width: '100%', height: '100%' }}
+          mapStyle="mapbox://styles/mapbox/dark-v11"
+          onLoad={onMapLoad}
+          onDragStart={handleMapInteraction}
+          onZoomStart={handleMapInteraction}
+          onPitchStart={handleMapInteraction}
+          interactiveLayerIds={['completed-route-interaction']}
+          onMouseMove={handleMapHover}
+          onMouseLeave={() => setMapTooltip(null)}
         >
-          {/* Route segments */}
-          <Source id="route-segments" type="geojson" data={segmentedLines}>
+          {/* 3D Buildings */}
+          <Layer
+            id="3d-buildings"
+            source="composite"
+            source-layer="building"
+            filter={['==', 'extrude', 'true']}
+            type="fill-extrusion"
+            minzoom={15}
+            paint={{
+              'fill-extrusion-color': '#1f2937',
+              'fill-extrusion-height': ['get', 'height'],
+              'fill-extrusion-base': ['get', 'min_height'],
+              'fill-extrusion-opacity': 0.6
+            }}
+          />
+
+          {/* Full Route (Faded background line) */}
+          <Source id="full-route" type="geojson" data={fullRouteGeoJSON}>
             <Layer
-              id="route-lines"
+              id="full-route-line"
               type="line"
-              layout={{ 'line-join': 'round', 'line-cap': 'round' }}
-              paint={{
-                'line-color': ['get', 'color'],
-                'line-width': ['get', 'width'],
-                'line-opacity': 0.9,
+              layout={{
+                'line-join': 'round',
+                'line-cap': 'round'
               }}
-            />
-            <Layer
-              id="route-glow"
-              type="line"
-              layout={{ 'line-join': 'round', 'line-cap': 'round' }}
               paint={{
-                'line-color': ['get', 'color'],
-                'line-width': ['*', ['get', 'width'], 4],
-                'line-blur': 15,
-                'line-opacity': 0.3,
+                'line-color': '#ffffff',
+                'line-width': 4,
+                'line-opacity': 0.15,
+                'line-dasharray': [2, 2]
               }}
             />
           </Source>
 
-          {/* KM Markers */}
-          {splits.length > 0 && routeCoords.length > 0 && splits.map((split) => {
-            const ptIdx = Math.min(
-              Math.floor((split.km / (run.distance_km || 1)) * routeCoords.length),
-              routeCoords.length - 1
-            );
-            const pt = routeCoords[ptIdx];
-            if (!pt) return null;
-            return (
-              <Marker key={split.km} longitude={pt[0]} latitude={pt[1]}>
-                <div className={cn(
-                  "flex flex-col items-center transition-all duration-500",
-                  activeSplit === split.km ? "scale-125" : "scale-100 opacity-60"
-                )}>
-                  <div className="bg-white/10 backdrop-blur-md border border-white/20 px-2 py-1 rounded-md text-[8px] font-black text-white mb-1 shadow-xl">
-                    {split.km} KM
+          {/* Completed Route (Progressive drawing) */}
+          <Source id="completed-route" type="geojson" data={completedRouteGeoJSON} lineMetrics={true}>
+            {/* Casing (Outline) */}
+            <Layer
+              id="completed-route-casing"
+              type="line"
+              layout={{
+                'line-join': 'round',
+                'line-cap': 'round'
+              }}
+              paint={{
+                'line-color': '#000000',
+                'line-width': 12,
+                'line-opacity': 0.5
+              }}
+            />
+            {/* Main Gradient Line */}
+            <Layer
+              id="completed-route-line"
+              type="line"
+              layout={{
+                'line-join': 'round',
+                'line-cap': 'round'
+              }}
+              paint={{
+                'line-width': 8,
+                'line-gradient': [
+                  'interpolate',
+                  ['linear'],
+                  ['line-progress'],
+                  0, '#00E5FF',   // Cyan start
+                  0.5, '#2979FF', // Blue middle
+                  1, '#FF9100'    // Orange tip
+                ]
+              }}
+            />
+            {/* Invisible thicker line for easier hovering */}
+            <Layer
+              id="completed-route-interaction"
+              type="line"
+              layout={{
+                'line-join': 'round',
+                'line-cap': 'round'
+              }}
+              paint={{
+                'line-color': 'transparent',
+                'line-width': 20
+              }}
+            />
+          </Source>
+
+          {/* Current Position Marker */}
+          {playbackPoint && (
+            <Marker 
+              longitude={playbackPoint.coordinates[0]} 
+              latitude={playbackPoint.coordinates[1]}
+              anchor="center"
+              rotationAlignment="map"
+              pitchAlignment="map"
+              rotation={currentBearing}
+              style={{ zIndex: 50 }}
+            >
+              <div className="relative flex items-center justify-center drop-shadow-[0_10px_20px_rgba(0,0,0,0.8)]">
+                <svg width="56" height="56" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  <path d="M24 8L40 38L24 32L8 38L24 8Z" fill="white" stroke="#1A1A1A" strokeWidth="1.5" strokeLinejoin="round"/>
+                  <path d="M24 8L40 38L24 32V8Z" fill="#E2E8F0" />
+                </svg>
+              </div>
+            </Marker>
+          )}
+
+          {/* Ghost Runner Dot */}
+          {isPlaying && showGhostRunner && ghostPoint && (
+            <Marker longitude={ghostPoint.coordinates[0]} latitude={ghostPoint.coordinates[1]}>
+              <div className="relative opacity-40">
+                <div className="w-4 h-4 bg-gray-400 rounded-full flex items-center justify-center shadow-xl border border-white/50">
+                  <Target className="w-2 h-2 text-white" />
+                </div>
+              </div>
+            </Marker>
+          )}
+
+          {/* Map Tooltip */}
+          {mapTooltip && mapTooltip.data && (
+            <Popup
+              longitude={mapTooltip.lngLat.lng}
+              latitude={mapTooltip.lngLat.lat}
+              closeButton={false}
+              anchor="bottom"
+              offset={15}
+              className="pointer-events-none"
+            >
+              <div className="bg-[#0F172A]/95 backdrop-blur-xl border border-white/20 p-3 rounded-xl shadow-2xl min-w-[120px]">
+                <div className="text-[8px] font-black text-gray-500 uppercase tracking-widest mb-2 border-b border-white/5 pb-1">Geospatial Intel</div>
+                <div className="space-y-2">
+                  <div className="flex justify-between items-center">
+                    <span className="text-[9px] font-bold text-gray-400">PACE</span>
+                    <span className="text-xs font-black italic text-emerald-400">{mapTooltip.data.pace?.toFixed(2) || '0.00'}</span>
                   </div>
-                  <div className="w-1.5 h-1.5 bg-white rounded-full shadow-[0_0_10px_rgba(255,255,255,0.5)]" />
-                </div>
-              </Marker>
-            );
-          })}
-
-          {/* Start Marker */}
-          {routeCoords.length > 0 && (
-            <Marker longitude={routeCoords[0][0]} latitude={routeCoords[0][1]}>
-              <div className="relative group">
-                <div className="absolute inset-0 animate-ping bg-emerald-500 rounded-full opacity-20" />
-                <div className="w-5 h-5 bg-emerald-500 rounded-full border-2 border-white shadow-2xl flex items-center justify-center">
-                  <div className="w-1.5 h-1.5 bg-white rounded-full" />
+                  <div className="flex justify-between items-center">
+                    <span className="text-[9px] font-bold text-gray-400">GAP</span>
+                    <span className="text-xs font-black italic text-blue-400">{((mapTooltip.data.pace || 0) - 0.15).toFixed(2)}</span>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-[9px] font-bold text-gray-400">ELEV</span>
+                    <span className="text-xs font-black italic text-amber-400">{Math.round(mapTooltip.data.elevation || 0)}m</span>
+                  </div>
                 </div>
               </div>
-            </Marker>
+            </Popup>
           )}
-
-          {/* End Marker */}
-          {routeCoords.length > 1 && (
-            <Marker longitude={routeCoords[routeCoords.length - 1][0]} latitude={routeCoords[routeCoords.length - 1][1]}>
-              <div className="w-5 h-5 bg-rose-500 rounded-full border-2 border-white shadow-2xl flex items-center justify-center">
-                <div className="w-1.5 h-1.5 bg-white rounded-full" />
-              </div>
-            </Marker>
-          )}
-
-          {/* Chart cursor marker on map */}
-          {hoveredPoint && (
-            <Marker longitude={hoveredPoint.lng} latitude={hoveredPoint.lat}>
-              <div className="relative">
-                <div className="absolute -inset-4 animate-pulse bg-[#C0FF00]/20 rounded-full" />
-                <div className="w-4 h-4 bg-[#C0FF00] rounded-full border-2 border-white shadow-[0_0_20px_rgba(192,255,0,0.6)]" />
-              </div>
-            </Marker>
-          )}
-
-          {/* Active split highlight */}
-          {activeSplit !== null && routeCoords.length > 0 && (
-            <Source id="active-split" type="geojson" data={{
-              type: 'Feature',
-              geometry: {
-                type: 'LineString',
-                coordinates: routeCoords.slice(
-                  Math.floor(((activeSplit - 1) / (run.distance_km || 1)) * routeCoords.length),
-                  Math.floor((activeSplit / (run.distance_km || 1)) * routeCoords.length)
-                ),
-              },
-              properties: {},
-            }}>
-              <Layer id="split-highlight" type="line" paint={{
-                'line-color': '#FFF', 'line-width': 12, 'line-blur': 5, 'line-opacity': 0.4,
-              }} />
-            </Source>
-          )}
-
-          <NavigationControl position="top-right" />
         </Map>
-      </div>
 
-      {/* OVERLAY: LEFT PANEL (SESSION ANALYTICS) */}
-      <div className="absolute top-8 left-8 bottom-8 w-[340px] pointer-events-none flex flex-col gap-4">
-        <GlassPanel title="SESSION ANALYTICS" icon={Gauge} className="pointer-events-auto flex-1 flex flex-col">
-          <div className="mb-6">
-            <h2 className="text-2xl font-black italic tracking-tighter text-white mb-1 uppercase">{runTitle}</h2>
-            <div className="flex items-center gap-2 text-[10px] font-bold text-gray-500 uppercase tracking-widest">
-              <Calendar className="w-3 h-3" />
-              <span>{run.date ? formatDate(run.date) : '—'}</span>
-              {run.location && <><span>•</span><span>{run.location}</span></>}
-            </div>
-          </div>
-
-          {/* Summary Stats */}
-          <div className="grid grid-cols-3 gap-3 mb-6">
-            <div className="bg-white/5 rounded-xl p-3 text-center">
-              <div className="text-[8px] font-black text-gray-500 uppercase tracking-widest mb-1">Distance</div>
-              <div className="text-lg font-black italic text-white">{run.distance_km?.toFixed(2)}</div>
-              <div className="text-[8px] font-black text-gray-600">KM</div>
-            </div>
-            <div className="bg-white/5 rounded-xl p-3 text-center">
-              <div className="text-[8px] font-black text-gray-500 uppercase tracking-widest mb-1">Time</div>
-              <div className="text-lg font-black italic text-white">{formatDuration(run.duration_minutes)}</div>
-            </div>
-            <div className="bg-white/5 rounded-xl p-3 text-center">
-              <div className="text-[8px] font-black text-gray-500 uppercase tracking-widest mb-1">Avg Pace</div>
-              <div className="text-lg font-black italic text-emerald-400">{run.avg_pace}</div>
-              <div className="text-[8px] font-black text-gray-600">/KM</div>
-            </div>
-          </div>
-
-          {/* Extra stats row */}
-          <div className="grid grid-cols-3 gap-3 mb-6">
-            <div className="bg-white/5 rounded-xl p-3 text-center">
-              <div className="text-[8px] font-black text-gray-500 uppercase tracking-widest mb-1">Avg HR</div>
-              <div className="text-lg font-black italic text-rose-500">{run.avg_hr ?? '—'}</div>
-              <div className="text-[8px] font-black text-gray-600">BPM</div>
-            </div>
-            <div className="bg-white/5 rounded-xl p-3 text-center">
-              <div className="text-[8px] font-black text-gray-500 uppercase tracking-widest mb-1">Max HR</div>
-              <div className="text-lg font-black italic text-rose-400">{run.max_hr ?? '—'}</div>
-              <div className="text-[8px] font-black text-gray-600">BPM</div>
-            </div>
-            <div className="bg-white/5 rounded-xl p-3 text-center">
-              <div className="text-[8px] font-black text-gray-500 uppercase tracking-widest mb-1">Elevation</div>
-              <div className="text-lg font-black italic text-amber-400">{run.elevation_gain?.toFixed(0) ?? '—'}</div>
-              <div className="text-[8px] font-black text-gray-600">M</div>
-            </div>
-          </div>
-
-          {/* Splits table */}
-          <div className="flex-1 flex flex-col min-h-0">
-            <div className="grid grid-cols-4 text-[8px] font-black uppercase tracking-[0.2em] text-gray-600 mb-4 px-2">
-              <span>KM</span>
-              <span>PACE</span>
-              <span>HR</span>
-              <span className="text-right">ELEV</span>
-            </div>
-            <div className="flex-1 overflow-y-auto custom-scrollbar pr-2 space-y-1">
-              {splits.map((split) => (
-                <button
-                  key={split.km}
-                  onMouseEnter={() => setActiveSplit(split.km)}
-                  onMouseLeave={() => setActiveSplit(null)}
-                  className={cn(
-                    "w-full grid grid-cols-4 items-center p-3 rounded-xl border transition-all group relative overflow-hidden",
-                    activeSplit === split.km
-                      ? "bg-[#C0FF00]/10 border-[#C0FF00]/30"
-                      : "bg-white/5 border-transparent hover:border-white/10"
-                  )}
-                >
-                  <span className="text-[10px] font-black text-gray-500">{String(split.km).padStart(2, '0')}</span>
-                  <span className="text-xs font-black italic text-white">{split.pace}</span>
-                  <span className="text-xs font-black italic text-rose-400">{split.hr != null ? Math.round(split.hr) : '—'}</span>
-                  <span className="text-xs font-black italic text-amber-400 text-right">
-                    {split.elevation_difference != null ? `${split.elevation_difference > 0 ? '+' : ''}${Math.round(split.elevation_difference)}m` : '—'}
-                  </span>
-                </button>
-              ))}
-              {splits.length === 0 && (
-                <div className="text-center text-gray-600 text-xs font-bold py-8">No split data</div>
+        {/* Map Overlays (Top Right) */}
+        <div className="absolute top-6 right-6 flex flex-col gap-2">
+          <div className="bg-[#0F172A]/80 backdrop-blur-xl border border-white/10 p-3 rounded-2xl shadow-xl flex flex-col gap-3">
+            <button 
+              onClick={() => {
+                if (runData && runData.length > 0) {
+                  mapRef.current?.flyTo({
+                    center: runData[0].coordinates,
+                    zoom: 14,
+                    pitch: 45,
+                    bearing: -20,
+                    duration: 2000
+                  });
+                }
+                setPlaybackIndex(0);
+                setIsPlaying(false);
+              }}
+              className="w-10 h-10 rounded-xl bg-white/5 hover:bg-white/10 flex items-center justify-center text-white transition-colors"
+              title="Reset View"
+            >
+              <RefreshCcw className="w-4 h-4" />
+            </button>
+            <button 
+              onClick={() => setShowGhostRunner(!showGhostRunner)}
+              className={cn(
+                "w-10 h-10 rounded-xl flex items-center justify-center transition-colors",
+                showGhostRunner ? "bg-[#C0FF00]/20 text-[#C0FF00]" : "bg-white/5 text-gray-400 hover:bg-white/10 hover:text-white"
               )}
-            </div>
-          </div>
-        </GlassPanel>
-      </div>
-
-      {/* OVERLAY: RIGHT PANEL */}
-      <div className="absolute top-8 right-8 w-[240px] pointer-events-none flex flex-col gap-4">
-        {/* Map mode selector */}
-        <GlassPanel title="ROUTE COLOR" icon={Layers} className="pointer-events-auto">
-          <div className="space-y-3">
-            {([['pace', 'PACE', '#3B82F6'], ['hr', 'HEART RATE', '#EF4444'], ['elevation', 'ELEVATION', '#F59E0B']] as const).map(([mode, label, clr]) => (
-              <button
-                key={mode}
-                onClick={() => setMapMode(mode as any)}
-                className={cn(
-                  "w-full flex items-center justify-between px-3 py-2 rounded-xl transition-all text-[10px] font-black uppercase tracking-widest",
-                  mapMode === mode ? "bg-white/10 text-white" : "text-gray-500 hover:text-gray-300"
-                )}
-              >
-                <span>{label}</span>
-                <div className={cn("w-3 h-3 rounded-full", mapMode === mode ? "opacity-100" : "opacity-30")} style={{ backgroundColor: clr }} />
-              </button>
-            ))}
-          </div>
-        </GlassPanel>
-
-        {/* Run info card */}
-        <div className="bg-[#0F172A]/90 backdrop-blur-2xl border border-white/10 p-5 rounded-3xl flex flex-col gap-3 shadow-2xl pointer-events-auto">
-          <div className="flex justify-between items-center border-b border-white/5 pb-2">
-            <span className="text-[9px] font-black uppercase tracking-widest text-gray-500">Run Info</span>
-            <Activity className="w-3 h-3 text-[#C0FF00]" />
-          </div>
-          <div className="space-y-2">
-            <div className="flex justify-between items-center">
-              <span className="text-[8px] font-bold text-gray-500 uppercase">Type</span>
-              <span className="text-[10px] font-black text-[#C0FF00] uppercase">{run.run_type}</span>
-            </div>
-            {run.avg_cadence && (
-              <div className="flex justify-between items-center">
-                <span className="text-[8px] font-bold text-gray-500 uppercase">Cadence</span>
-                <span className="text-[10px] font-black text-amber-400">{Math.round(run.avg_cadence * 2)} spm</span>
-              </div>
-            )}
-            {run.avg_hr_pct && (
-              <div className="flex justify-between items-center">
-                <span className="text-[8px] font-bold text-gray-500 uppercase">Avg HR %</span>
-                <span className="text-[10px] font-black text-rose-400">{run.avg_hr_pct}%</span>
-              </div>
-            )}
+              title="Toggle Ghost Runner"
+            >
+              <Target className="w-4 h-4" />
+            </button>
           </div>
         </div>
       </div>
-
-      {/* OVERLAY: BOTTOM — Detailed chart with cursor sync to map */}
-      {chartData.length > 0 && (
-        <div className="absolute bottom-6 left-[380px] right-8 pointer-events-none">
-          <div className="bg-[#0A0F1A]/90 backdrop-blur-2xl border border-white/[0.06] rounded-2xl shadow-2xl pointer-events-auto">
-            {/* Chart header */}
-            <div className="px-6 pt-5 pb-3 flex items-center justify-between">
-              {/* Metric selector pills */}
-              <div className="flex items-center gap-2">
-                {([
-                  { key: 'pace', label: 'Pace', color: '#C0FF00', value: run.avg_pace + '/km' },
-                  { key: 'hr', label: 'Heart Rate', color: '#F43F5E', value: run.avg_hr ? `${Math.round(run.avg_hr)} bpm` : '—' },
-                  { key: 'cadence', label: 'Cadence', color: '#8B5CF6', value: run.avg_cadence ? `${Math.round(run.avg_cadence * 2)} spm` : '—' },
-                ] as const).map(({ key, label, color, value }) => (
-                  <button
-                    key={key}
-                    onClick={() => toggleChartMetric(key)}
-                    className={cn(
-                      "flex items-center gap-2.5 px-4 py-2 rounded-xl border transition-all duration-200",
-                      chartMetrics.has(key)
-                        ? "border-white/10 bg-white/[0.06]"
-                        : "border-transparent bg-transparent opacity-40 hover:opacity-70"
-                    )}
-                  >
-                    <div
-                      className={cn("w-2.5 h-2.5 rounded-full transition-all", chartMetrics.has(key) ? "scale-100" : "scale-75")}
-                      style={{ backgroundColor: color, boxShadow: chartMetrics.has(key) ? `0 0 8px ${color}50` : 'none' }}
-                    />
-                    <div className="flex flex-col items-start">
-                      <span className="text-[8px] font-black uppercase tracking-[0.15em] text-gray-500">{label}</span>
-                      <span className="text-xs font-black italic" style={{ color: chartMetrics.has(key) ? color : '#6B7280' }}>{value}</span>
-                    </div>
-                  </button>
-                ))}
-              </div>
-
-              {/* Hovered point values or elevation badge */}
-              {hoveredStreamIdx != null && chartData[hoveredStreamIdx] ? (
-                <div className="flex gap-5 items-center">
-                  {chartMetrics.has('pace') && chartData[hoveredStreamIdx].pace && (
-                    <div className="text-right">
-                      <div className="text-[7px] font-black text-gray-600 uppercase tracking-widest">Pace</div>
-                      <div className="text-sm font-black italic text-[#C0FF00]">
-                        {Math.floor(chartData[hoveredStreamIdx].pace / 60)}:{String(Math.round(chartData[hoveredStreamIdx].pace % 60)).padStart(2, '0')}/km
-                      </div>
-                    </div>
-                  )}
-                  {chartMetrics.has('hr') && chartData[hoveredStreamIdx].hr && (
-                    <div className="text-right">
-                      <div className="text-[7px] font-black text-gray-600 uppercase tracking-widest">HR</div>
-                      <div className="text-sm font-black italic text-[#F43F5E]">{Math.round(chartData[hoveredStreamIdx].hr)} bpm</div>
-                    </div>
-                  )}
-                  {chartMetrics.has('cadence') && chartData[hoveredStreamIdx].cadence && (
-                    <div className="text-right">
-                      <div className="text-[7px] font-black text-gray-600 uppercase tracking-widest">Cadence</div>
-                      <div className="text-sm font-black italic text-[#8B5CF6]">{Math.round(chartData[hoveredStreamIdx].cadence)} spm</div>
-                    </div>
-                  )}
-                  <div className="text-right">
-                    <div className="text-[7px] font-black text-gray-600 uppercase tracking-widest">Dist</div>
-                    <div className="text-sm font-black italic text-white">{chartData[hoveredStreamIdx].dist} km</div>
-                  </div>
-                </div>
-              ) : (
-                <div className="flex items-center gap-2 px-3 py-1.5 bg-white/[0.04] rounded-lg">
-                  <Mountain className="w-3.5 h-3.5 text-amber-400" />
-                  <span className="text-xs font-black italic text-amber-400">{run.elevation_gain?.toFixed(0) ?? '—'}m</span>
-                </div>
-              )}
-            </div>
-
-            {/* Chart */}
-            <div className="h-36 px-4 pb-4">
-              <ResponsiveContainer width="100%" height="100%">
-                <ComposedChart
-                  data={chartData}
-                  margin={{ top: 8, right: 12, bottom: 0, left: 12 }}
-                  onMouseMove={(e: any) => {
-                    if (e && e.activeTooltipIndex != null) setHoveredStreamIdx(e.activeTooltipIndex);
-                  }}
-                  onMouseLeave={() => setHoveredStreamIdx(null)}
-                >
-                  <defs>
-                    <linearGradient id="paceGrad" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor="#C0FF00" stopOpacity={0.2} />
-                      <stop offset="100%" stopColor="#C0FF00" stopOpacity={0.01} />
-                    </linearGradient>
-                    <linearGradient id="hrGrad" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor="#F43F5E" stopOpacity={0.12} />
-                      <stop offset="100%" stopColor="#F43F5E" stopOpacity={0.01} />
-                    </linearGradient>
-                    <linearGradient id="cadenceGrad" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor="#8B5CF6" stopOpacity={0.12} />
-                      <stop offset="100%" stopColor="#8B5CF6" stopOpacity={0.01} />
-                    </linearGradient>
-                  </defs>
-                  <CartesianGrid strokeDasharray="none" stroke="rgba(255,255,255,0.03)" vertical={false} />
-                  <XAxis
-                    dataKey="dist"
-                    tick={{ fontSize: 9, fill: '#374151', fontWeight: 800 }}
-                    axisLine={{ stroke: 'rgba(255,255,255,0.06)' }}
-                    tickLine={false}
-                    interval={streams.length > 0 ? Math.floor(chartData.length / 12) : 0}
-                    tickFormatter={(v) => v ? `${v}` : ''}
-                  />
-                  <YAxis yAxisId="pace" orientation="left" hide reversed />
-                  <YAxis yAxisId="hr" orientation="right" hide />
-                  <YAxis yAxisId="cadence" hide />
-                  <Tooltip content={() => null} cursor={{ stroke: 'rgba(192,255,0,0.25)', strokeWidth: 1 }} />
-
-                  {chartMetrics.has('pace') && (
-                    <Area yAxisId="pace" type="monotone" dataKey="pace" stroke="#C0FF00" strokeWidth={1.5} fill="url(#paceGrad)" dot={false} isAnimationActive={false} />
-                  )}
-                  {chartMetrics.has('hr') && (
-                    <Area yAxisId="hr" type="monotone" dataKey="hr" stroke="#F43F5E" strokeWidth={1.5} fill="url(#hrGrad)" dot={false} isAnimationActive={false} connectNulls />
-                  )}
-                  {chartMetrics.has('cadence') && (
-                    <Area yAxisId="cadence" type="monotone" dataKey="cadence" stroke="#8B5CF6" strokeWidth={1.5} fill="url(#cadenceGrad)" dot={false} isAnimationActive={false} connectNulls />
-                  )}
-                </ComposedChart>
-              </ResponsiveContainer>
-            </div>
-          </div>
-        </div>
-      )}
-    </main>
+    </div>
   );
 }

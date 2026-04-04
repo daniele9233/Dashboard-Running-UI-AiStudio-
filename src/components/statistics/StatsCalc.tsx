@@ -1,5 +1,5 @@
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine } from 'recharts';
-import { FlaskConical, Zap, Flame, Dna, Calendar, Star, Briefcase, TrendingUp, BarChart2 } from 'lucide-react';
+import { FlaskConical, Zap, Flame, Dna, Calendar, Star, Briefcase, TrendingUp } from 'lucide-react';
 
 const futureData = [
   { date: 'Oggi', condizione: 18, affaticamento: 15, forma: 3 },
@@ -36,9 +36,9 @@ export function StatsCalc() {
                   <Line type="monotone" dataKey="affaticamento" stroke="#64748B" strokeWidth={3} dot={false} />
                   <Line type="monotone" dataKey="forma" stroke="#10B981" strokeWidth={3} dot={(props: any) => {
                     if (props.payload.date === '1/4') {
-                      return <circle key={props.key} cx={props.cx} cy={props.cy} r={6} fill="#121212" stroke="#10B981" strokeWidth={3} />;
+                      return <circle cx={props.cx} cy={props.cy} r={6} fill="#121212" stroke="#10B981" strokeWidth={3} />;
                     }
-                    return <circle key={props.key} cx={props.cx} cy={props.cy} r={0} fill="none" />;
+                    return <span/>;
                   }} />
                 </LineChart>
               </ResponsiveContainer>
@@ -216,3 +216,24 @@ export function StatsCalc() {
   );
 }
 
+// Dummy icon for BarChart2 since it wasn't imported at the top
+function BarChart2(props: any) {
+  return (
+    <svg
+      {...props}
+      xmlns="http://www.w3.org/2000/svg"
+      width="24"
+      height="24"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <line x1="18" x2="18" y1="20" y2="10" />
+      <line x1="12" x2="12" y1="20" y2="4" />
+      <line x1="6" x2="6" y1="20" y2="14" />
+    </svg>
+  )
+}

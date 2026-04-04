@@ -1,7 +1,4 @@
 import React, { useState } from 'react';
-import { useApi } from '../../hooks/useApi';
-import { getAnalytics, getVdotPaces } from '../../api';
-import type { AnalyticsResponse, VdotPacesResponse } from '../../types/api';
 import { 
   Activity, 
   Zap, 
@@ -184,24 +181,8 @@ const CircularGauge = ({ value, label, status, color, size = "small" }: any) => 
   );
 };
 
-function vdotLevel(v: number): { label: string; color: string } {
-  if (v >= 52) return { label: "Elite", color: "#C0FF00" };
-  if (v >= 47) return { label: "Avanzato", color: "#10B981" };
-  if (v >= 40) return { label: "Buono", color: "#3B82F6" };
-  if (v >= 32) return { label: "Intermedio", color: "#EAB308" };
-  return { label: "Principiante", color: "#F43F5E" };
-}
-
 export function StatisticsView() {
   const [activeTab, setActiveTab] = useState('dashboard');
-  const { data: analyticsData } = useApi<AnalyticsResponse>(getAnalytics);
-  const { data: vdotData } = useApi<VdotPacesResponse>(getVdotPaces);
-
-  const vdot = vdotData?.vdot ?? null;
-  const level = vdot ? vdotLevel(vdot) : null;
-  const paces = vdotData?.paces ?? {};
-  const racePredictions = vdotData?.race_predictions ?? analyticsData?.race_predictions ?? {};
-  const zoneDistribution = analyticsData?.zone_distribution ?? [];
 
   const tabs = [
     { id: 'dashboard', label: 'Dashboard', icon: LayoutGrid },
@@ -338,46 +319,26 @@ export function StatisticsView() {
                   <Heart className="w-6 h-6 text-[#F43F5E]" />
                   <h2 className="text-xl font-black tracking-widest uppercase italic">Time in Zones</h2>
                 </div>
-                {zoneDistribution.length > 0 ? (
-                  <div className="space-y-5">
-                    {zoneDistribution.map((zone, i) => {
-                      const colors = ["#64748B","#3B82F6","#10B981","#EAB308","#F43F5E"];
-                      return (
-                        <div key={i} className="group">
-                          <div className="flex justify-between text-[10px] font-black uppercase tracking-widest mb-2">
-                            <span className="text-gray-400">{zone.zone} {zone.name}</span>
-                            <span className="text-white">{zone.pct}%</span>
-                          </div>
-                          <div className="h-2 w-full bg-[#181818] rounded-full overflow-hidden border border-[#2A2A2A]">
-                            <div
-                              className="h-full rounded-full transition-all duration-500"
-                              style={{ width: `${zone.pct}%`, backgroundColor: colors[i] }}
-                            />
-                          </div>
-                          <div className="text-[9px] text-gray-600 mt-1">{zone.minutes} min</div>
+                <div className="space-y-6">
+                  {zoneData.map((zone, i) => {
+                    const total = zoneData.reduce((acc, curr) => acc + curr.time, 0);
+                    const percentage = Math.round((zone.time / total) * 100);
+                    return (
+                      <div key={i} className="group">
+                        <div className="flex justify-between text-[10px] font-black uppercase tracking-widest mb-2">
+                          <span className="text-gray-400">{zone.name}</span>
+                          <span className="text-white">{percentage}%</span>
                         </div>
-                      );
-                    })}
-                  </div>
-                ) : (
-                  <div className="space-y-5">
-                    {zoneData.map((zone, i) => {
-                      const total = zoneData.reduce((acc, curr) => acc + curr.time, 0);
-                      const percentage = Math.round((zone.time / total) * 100);
-                      return (
-                        <div key={i} className="group">
-                          <div className="flex justify-between text-[10px] font-black uppercase tracking-widest mb-2">
-                            <span className="text-gray-400">{zone.name}</span>
-                            <span className="text-white">{percentage}%</span>
-                          </div>
-                          <div className="h-2 w-full bg-[#181818] rounded-full overflow-hidden border border-[#2A2A2A]">
-                            <div className="h-full rounded-full transition-all duration-500" style={{ width: `${percentage}%`, backgroundColor: zone.fill }} />
-                          </div>
+                        <div className="h-2 w-full bg-[#181818] rounded-full overflow-hidden border border-[#2A2A2A]">
+                          <div 
+                            className="h-full rounded-full transition-all duration-500" 
+                            style={{ width: `${percentage}%`, backgroundColor: zone.fill }}
+                          />
                         </div>
-                      );
-                    })}
-                  </div>
-                )}
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
             </div>
           </div>
@@ -389,59 +350,39 @@ export function StatisticsView() {
             
             {/* VO2 Max & Goal */}
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
-              {/* VDOT Dinamico */}
+              {/* VO2 Max */}
               <div className="lg:col-span-4 bg-[#111111] border border-[#222] rounded-3xl p-8 flex flex-col justify-center">
-                <div className="flex items-center gap-3 mb-6">
+                <div className="flex items-center gap-3 mb-8">
                   <Activity className="w-6 h-6 text-[#3B82F6]" />
-                  <h2 className="text-xl font-black tracking-widest uppercase italic">VDOT Dinamico</h2>
+                  <h2 className="text-xl font-black tracking-widest uppercase italic">VO2 Max Stimato</h2>
                 </div>
-                {vdot ? (
-                  <>
-                    <div className="flex items-center gap-8 mb-6">
-                      <div className="relative w-32 h-32 flex-shrink-0 flex items-center justify-center">
-                        <svg className="w-full h-full transform -rotate-90" viewBox="0 0 100 100">
-                          <circle cx="50" cy="50" r="44" fill="transparent" stroke="#1E1E1E" strokeWidth="8" />
-                          <circle cx="50" cy="50" r="44" fill="transparent" stroke={level!.color} strokeWidth="8"
-                            strokeDasharray="276.46"
-                            strokeDashoffset={276.46 * (1 - vdot / 60)}
-                            strokeLinecap="round"
-                            className="transition-all duration-1000"
-                          />
-                        </svg>
-                        <div className="absolute inset-0 flex items-center justify-center">
-                          <span className="text-3xl font-black italic text-white">{vdot}</span>
-                        </div>
-                      </div>
-                      <div className="space-y-2">
-                        <div className="text-sm font-black uppercase tracking-widest" style={{ color: level!.color }}>{level!.label}</div>
-                        <div className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">ml/kg/min</div>
-                        <div className="text-[10px] text-gray-600 font-medium italic">Jack Daniels formula</div>
-                      </div>
+                <div className="flex items-center gap-8">
+                  <div className="relative w-32 h-32 flex items-center justify-center">
+                    <svg className="w-full h-full transform -rotate-90" viewBox="0 0 100 100">
+                      <circle cx="50" cy="50" r="44" fill="transparent" stroke="#1E1E1E" strokeWidth="8" />
+                      <circle cx="50" cy="50" r="44" fill="transparent" stroke="#3B82F6" strokeWidth="8" strokeDasharray="276.46" strokeDashoffset={276.46 * (1 - 40.6/60)} strokeLinecap="round" />
+                    </svg>
+                    <div className="absolute inset-0 flex items-center justify-center">
+                      <span className="text-3xl font-black italic text-white">40.6</span>
                     </div>
-                    {/* VDOT scale */}
-                    <div className="mt-2">
-                      <div className="flex justify-between text-[9px] text-gray-600 font-bold mb-1">
-                        <span>Princ.</span><span>Interm.</span><span>Buono</span><span>Avanz.</span><span>Elite</span>
-                      </div>
-                      <div className="h-2 w-full rounded-full overflow-hidden flex">
-                        {[["#F43F5E",20],["#EAB308",15],["#3B82F6",15],["#10B981",15],["#C0FF00",35]].map(([c,w],i) => (
-                          <div key={i} className="h-full" style={{ width: `${w}%`, backgroundColor: c as string }} />
-                        ))}
-                      </div>
-                      <div className="mt-1 relative h-3">
-                        <div
-                          className="absolute top-0 w-0.5 h-3 bg-white rounded-full"
-                          style={{ left: `${Math.min((vdot / 60) * 100, 98)}%` }}
-                        />
-                      </div>
-                    </div>
-                  </>
-                ) : (
-                  <div className="text-center py-8">
-                    <div className="text-gray-600 text-sm font-bold">—</div>
-                    <div className="text-gray-500 text-xs mt-2">Sincronizza corse per calcolare il VDOT</div>
                   </div>
-                )}
+                  <div className="space-y-2">
+                    <div className="text-sm font-black text-[#10B981] uppercase tracking-widest">Medio</div>
+                    <div className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">ml/kg/min</div>
+                    <div className="flex items-center gap-2 text-[10px] font-black text-[#EAB308] uppercase tracking-widest">
+                      <Target className="w-3 h-3" /> Target: 47.9
+                    </div>
+                  </div>
+                </div>
+                <div className="h-32 w-full mt-8">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <LineChart data={vo2Data}>
+                      <XAxis dataKey="date" hide />
+                      <YAxis hide domain={['dataMin - 2', 'dataMax + 2']} />
+                      <Line type="monotone" dataKey="value" stroke="#3B82F6" strokeWidth={3} dot={{ r: 4, fill: '#3B82F6' }} />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
               </div>
 
               {/* Soglia Anaerobica */}
@@ -528,62 +469,37 @@ export function StatisticsView() {
               </div>
             </div>
 
-            {/* Race Predictions from VDOT */}
+            {/* Goal Progress */}
             <div className="bg-[#111111] border border-[#222] rounded-3xl p-8">
               <div className="flex items-center gap-3 mb-8">
                 <Target className="w-6 h-6 text-[#F43F5E]" />
-                <h2 className="text-xl font-black tracking-widest uppercase italic">Previsioni Gara</h2>
-                <span className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">da VDOT {vdot ?? '—'}</span>
+                <h2 className="text-xl font-black tracking-widest uppercase italic">Obiettivo Mezza Maratona</h2>
               </div>
-              {Object.keys(racePredictions).length > 0 ? (
-                <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-                  {[
-                    { key: "5K", label: "5 km", color: "#3B82F6", icon: "🏃" },
-                    { key: "10K", label: "10 km", color: "#10B981", icon: "🏃" },
-                    { key: "Half Marathon", label: "Mezza", color: "#8B5CF6", icon: "🏅" },
-                    { key: "Marathon", label: "Maratona", color: "#F43F5E", icon: "🏆" },
-                  ].map(({ key, label, color }) => (
-                    <div key={key} className="bg-[#181818] border border-[#2A2A2A] rounded-2xl p-5 text-center">
-                      <div className="text-[10px] font-black uppercase tracking-widest mb-3" style={{ color }}>{label}</div>
-                      <div className="text-2xl font-black italic text-white">{racePredictions[key] ?? "—"}</div>
-                      <div className="text-[10px] text-gray-500 font-bold mt-1">Daniels formula</div>
-                    </div>
-                  ))}
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-10 items-center">
+                <div className="text-center lg:text-left">
+                  <div className="text-[10px] font-black text-gray-500 uppercase tracking-widest mb-2">Target</div>
+                  <div className="text-4xl font-black text-[#10B981] italic">1:35:00</div>
+                  <div className="text-sm font-bold text-gray-500 mt-1 italic">4:30/km</div>
                 </div>
-              ) : (
-                <p className="text-center text-gray-600 text-sm py-4">Sincronizza corse validate (4–21 km, HR ≥ 85% FC Max) per calcolare le previsioni</p>
-              )}
-            </div>
-
-            {/* 5 Zone Daniels — Training Paces */}
-            <div className="bg-[#111111] border border-[#222] rounded-3xl p-8">
-              <div className="flex items-center gap-3 mb-8">
-                <Zap className="w-6 h-6 text-[#C0FF00]" />
-                <h2 className="text-xl font-black tracking-widest uppercase italic">Zone di Allenamento Daniels</h2>
+                <div className="flex flex-col items-center">
+                  <div className="text-[10px] font-black text-gray-500 uppercase tracking-widest mb-2">Attuale</div>
+                  <div className="text-4xl font-black text-white italic">1:51:35</div>
+                  <div className="text-sm font-bold text-gray-500 mt-1 italic">5:17/km</div>
+                </div>
+                <div className="bg-[#181818] border border-[#2A2A2A] rounded-2xl p-6 text-center">
+                  <div className="text-[10px] font-black text-[#EAB308] uppercase tracking-widest mb-2">Gap</div>
+                  <div className="text-4xl font-black text-[#EAB308] italic">+16:36</div>
+                </div>
               </div>
-              {Object.keys(paces).length > 0 ? (
-                <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
-                  {[
-                    { key: "easy",       zone: "E",  name: "Easy",       desc: "Recupero attivo / corsa lenta", pct: "59–74%", color: "#3B82F6" },
-                    { key: "marathon",   zone: "M",  name: "Marathon",   desc: "Ritmo maratona", pct: "75–84%", color: "#10B981" },
-                    { key: "threshold",  zone: "T",  name: "Threshold",  desc: "Soglia lattato (20–40 min)", pct: "83–88%", color: "#EAB308" },
-                    { key: "interval",   zone: "I",  name: "Interval",   desc: "Intervalli VO2max (3–5 min)", pct: "95–100%", color: "#F59E0B" },
-                    { key: "repetition", zone: "R",  name: "Repetition", desc: "Ripetute velocità (< 2 min)", pct: "105–120%", color: "#F43F5E" },
-                  ].map(({ key, zone, name, desc, pct, color }) => (
-                    <div key={key} className="bg-[#181818] border border-[#2A2A2A] rounded-2xl p-5 flex flex-col gap-2">
-                      <div className="flex items-center justify-between">
-                        <span className="text-2xl font-black italic" style={{ color }}>{zone}</span>
-                        <span className="text-[9px] font-bold text-gray-600 uppercase tracking-wider">{pct}</span>
-                      </div>
-                      <div className="text-xs font-black text-white uppercase tracking-wider">{name}</div>
-                      <div className="text-xl font-black text-white">{(paces as Record<string,string|null>)[key] ?? "—"}<span className="text-xs text-gray-500 font-normal ml-1">/km</span></div>
-                      <div className="text-[10px] text-gray-500 italic leading-tight">{desc}</div>
-                    </div>
-                  ))}
+              <div className="mt-10">
+                <div className="flex justify-between text-[10px] font-black text-gray-500 uppercase tracking-widest mb-3">
+                  <span>Progressi</span>
+                  <span className="text-[#10B981]">85% verso l'obiettivo</span>
                 </div>
-              ) : (
-                <p className="text-center text-gray-600 text-sm py-4">VDOT non disponibile — sincronizza corse validate per calcolare i passi</p>
-              )}
+                <div className="h-4 w-full bg-[#181818] rounded-full overflow-hidden border border-[#2A2A2A]">
+                  <div className="h-full bg-gradient-to-r from-[#3B82F6] to-[#10B981] rounded-full" style={{ width: '85%' }} />
+                </div>
+              </div>
             </div>
           </div>
         )}
